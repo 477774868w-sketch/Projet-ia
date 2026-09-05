@@ -144,12 +144,30 @@ sources/                      ← à déposer dans le Projet
   12_DONNEES_SOURCES.md       schémas CSV, qualité, cadence
   13_LEXIQUE.md               vocabulaire
 
-engine/footyedge.py           moteur, zéro dépendance, ~2 600 lignes
+engine/footyedge.py           moteur, zéro dépendance, ~2 700 lignes
+engine/README.md              organisation du moteur, conventions, performances
 tests/test_footyedge.py       52 tests indépendants
-data/                         priors + modèles de fichiers
-scripts/generate_priors.py    régénération de league_priors.csv
-AUDIT.md                      rapport d'audit du système
+data/                         priors de 55 compétitions + modèles de fichiers
+scripts/generate_priors.py    régénère data/league_priors.csv
+scripts/generate_tables.py    régénère les tables chiffrées de sources/
+scripts/audit.py              audit complet du dépôt (64 contrôles)
+AUDIT.md                      rapport d'audit, limites, recommandations
 ```
+
+## Vérifier l'ensemble
+
+```bash
+python3 scripts/audit.py
+```
+
+309 contrôles au total : intégrité mathématique du moteur, fonctionnement de
+toutes les commandes, **conformité des tables de la documentation au code**,
+exactitude des affirmations chiffrées, renvois entre fichiers, validité des
+données, et un scénario complet de bout en bout.
+
+Les tables chiffrées des documents `sources/` sont produites par le moteur et
+revérifiées par l'audit : une divergence entre le code et la documentation est
+une erreur détectable, pas un écart silencieux.
 
 ---
 
