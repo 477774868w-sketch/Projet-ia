@@ -1,0 +1,8 @@
+{
+  "Guingamp": {"pts": 41, "gf": 33, "ga": 28},
+  "Amiens":   {"pts": 38, "gf": 30, "ga": 27},
+  "Bastia":   {"pts": 35, "gf": 26, "ga": 29},
+  "Grenoble": {"pts": 34, "gf": 28, "ga": 30},
+  "Laval":    {"pts": 30, "gf": 24, "ga": 31},
+  "Pau":      {"pts": 26, "gf": 21, "ga": 34}
+}
