@@ -1,6 +1,0 @@
-[
-  {"home": "Guingamp", "away": "Amiens"},
-  {"home": "Bastia",   "away": "Grenoble"},
-  {"home": "Laval",    "away": "Pau"},
-  {"home": "Amiens",   "away": "Bastia", "neutral": false}
-]
