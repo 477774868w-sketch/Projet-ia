@@ -20,6 +20,8 @@ import argparse
 import csv
 import json
 import os
+import math
+import random
 import re
 import subprocess
 import sys
@@ -134,6 +136,10 @@ def audit_cli(a):
               "--away", syn["teams"][1], "--market-1x2", "2.30", "3.30", "3.20",
               "--offered", offered, "--brief"],
              lambda o: "Intensites" in o.replace("é", "e")),
+            ("tune", [PY, ENGINE, "tune", "--csv", csv_path, "--half-lives",
+                      "200", "--regs", "1.0", "--w-markets", "0", "0.5", "1",
+                      "--min-train", "200", "--refit", "90", "--iters", "120"],
+             lambda o: "MEILLEURE CONFIGURATION" in o and "Sensibilite" in o),
             ("calib", [PY, ENGINE, "calib", "--log",
                        os.path.join(ROOT, "data", "bets_log_template.csv")],
              lambda o: "AUDIT DU JOURNAL" in o and "CALIBRATION" in o),
@@ -290,6 +296,135 @@ def audit_journal(a):
             any("CLV" in x for x in fe.analyse_log(bad)["stop_criteria_triggered"]))
 
 
+def audit_new_capabilities(a):
+    a.section("4 quater. Ajustement conjoint, incertitude, reglage, prix")
+
+    pyr = fe.synthetic_pyramid(n_per_div=12, seasons=3, seed=17)
+    joint = fe.fit_dixon_coles(pyr["matches"], half_life_days=1e6, reg=0.7,
+                               max_iter=700)
+    teams = pyr["teams"]
+    c_joint = _corr([pyr["att"][t] - pyr["def"][t] for t in teams],
+                    [joint.att[t] - joint.dfn[t] for t in teams])
+    a.check("multi", "notes comparables entre divisions (correlation %.3f)" % c_joint,
+            c_joint > 0.85)
+    a.check("multi", "decalage de niveau de buts du bon signe",
+            joint.theta["D2"] < joint.theta["D1"])
+    a.check("multi", "un seul championnat : comportement inchange",
+            len(fe.fit_dixon_coles(
+                fe.synthetic_league(n_teams=10, seasons=1, seed=2)["matches"],
+                max_iter=60).leagues) == 1)
+    n1 = joint.lambdas(teams[0], teams[1], neutral=True, league="D1")
+    n2 = joint.lambdas(teams[0], teams[1], neutral=True, league="D2")
+    a.check("multi", "changer de division ne change pas la force relative",
+            abs((n1[0] / n1[1]) - (n2[0] / n2[1])) < 1e-12)
+
+    syn = fe.synthetic_league(n_teams=14, seasons=3, seed=41)
+    m = fe.fit_dixon_coles(syn["matches"], half_life_days=1e6, reg=0.8,
+                           max_iter=500)
+    fn = (lambda g: g.result_probs()[0])
+    sd = fe.probability_sigma(m, "T00", "T01", fn)
+    a.check("fisher", "sigma d'une probabilite dans (0 ; 0.2) : %.4f" % sd,
+            0.0 < sd < 0.2)
+    a.check("fisher", "la fusion avec le marche reduit l'incertitude a proportion",
+            abs(fe.probability_sigma(m, "T00", "T01", fn, weight=0.5) - 0.5 * sd) < 1e-9
+            and fe.probability_sigma(m, "T00", "T01", fn, weight=0.0) == 0.0)
+    small = math.sqrt(fe.fit_dixon_coles(
+        fe.synthetic_league(n_teams=14, seasons=1, seed=41)["matches"],
+        half_life_days=1e6, reg=0.8, max_iter=400
+    ).lambda_uncertainty("T00", "T01")[0])
+    a.check("fisher", "l'incertitude decroit avec les donnees (%.4f -> %.4f)"
+            % (small, math.sqrt(m.lambda_uncertainty("T00", "T01")[0])),
+            math.sqrt(m.lambda_uncertainty("T00", "T01")[0]) < small)
+    a.check("fisher", "un modele recharge ne pretend pas savoir",
+            fe.DixonColesModel.from_dict(m.to_dict())
+            .lambda_uncertainty("T00", "T01") is None)
+
+    preds, ys = [], []
+    rng = random.Random(5)
+    base = (0.50, 0.28, 0.22)
+    for _ in range(1200):
+        q = [x ** 1.6 for x in base]
+        tot = sum(q)
+        preds.append([x / tot for x in q])
+        u, cum, y = rng.random(), 0.0, 2
+        for k, x in enumerate(base):
+            cum += x
+            if u < cum:
+                y = k
+                break
+        ys.append(y)
+    cal = fe.fit_calibration(preds, ys)
+    a.check("calib", "sur-confiance detectee (temperature %.3f > 1)" % cal.temperature,
+            cal.temperature > 1.1)
+    a.check("calib", "la log-perte s'ameliore apres recalibration",
+            cal.meta["log_loss_after"] < cal.meta["log_loss_before"])
+    a.check("calib", "un modele calibre est laisse tranquille",
+            fe.fit_calibration(*(lambda pr, yy: (pr, yy))(
+                [list(base)] * 1200, ys)).temperature < 1.15)
+    a.check("calib", "echantillon insuffisant -> identite",
+            fe.fit_calibration([[0.5, 0.3, 0.2]] * 10, [0] * 10).is_identity())
+    a.check("calib", "08 documente l'arbitrage finesse / calibration",
+            "n'est pas gratuite" in read("sources/08_CALIBRATION_AUDIT.md"))
+
+    o, book, nb, med = fe.best_price({"A": 2.10, "B": 2.25, "C": 2.05})
+    a.check("prix", "meilleure cote et operateur retenus",
+            o == 2.25 and book == "B" and nb == 3 and abs(med - 2.10) < 1e-12)
+    g = fe.ScoreGrid.from_lambdas(1.5, 1.2, -0.05)
+    row = fe.scan_value(g, {"1x2": {"home": {"A": 2.10, "B": 2.60}}})[0]
+    a.check("prix", "scan_value joue le meilleur prix",
+            row["odds"] == 2.60 and row["book"] == "B" and row["shop_gain"] > 0)
+    cons = fe.consensus_probs([[2.10, 3.40, 3.60], [2.05, 3.50, 3.70]])
+    a.check("prix", "consensus : probabilites deviguees puis mises en commun",
+            abs(sum(cons["probs"]) - 1.0) < 1e-9 and cons["n_books"] == 2)
+
+    fnb = lambda gg: gg.over_under(2.5)["over"]["win"]
+    odds = 1.15 / fnb(g)
+    be = fe.break_even_shift(g, fnb, odds)
+    moved = fe.ScoreGrid.from_lambdas(g.lam_h * math.exp(be["log_shift"]),
+                                      g.lam_a * math.exp(be["log_shift"]), g.rho)
+    a.check("bascule", "le seuil de bascule annule bien l'avantage",
+            abs(fnb(moved) * odds - 1.0) < 1e-3)
+    a.check("bascule", "un « plus de » meurt quand le total baisse",
+            be["total_goals_shift"] < 0)
+    a.check("bascule", "aucun seuil sans avantage",
+            fe.break_even_shift(g, fnb, 0.9 / fnb(g)) is None)
+
+    syn2 = fe.synthetic_league(n_teams=14, seasons=3, seed=31)
+    fe.add_synthetic_odds(syn2["matches"], att=syn2["att"], dfn=syn2["def"],
+                          mu=syn2["mu"], hfa=syn2["hfa"], noise=0.14)
+    tuned = fe.tune_hyperparameters(syn2["matches"], half_lives=(200.0,),
+                                    regs=(1.0,), w_markets=(0.0, 0.5, 1.0),
+                                    min_train=400, refit_every_days=90,
+                                    max_iter=150, warm_iter=40)
+    pure = [r for r in tuned["grid"] if r["w_market"] == 1.0][0]
+    a.check("tune", "w = 1 redonne le RPS du marche",
+            abs(pure["rps"] - tuned["market_rps"]) < 0.002)
+    a.check("tune", "grille triee par RPS croissant",
+            tuned["grid"] == sorted(tuned["grid"], key=lambda r: r["rps"]))
+    a.check("tune", "verdict explicite rendu", bool(tuned["verdict"]))
+    a.check("tune", "le reglage refuse sans cotes",
+            _raises_value_error(lambda: fe.tune_hyperparameters(
+                fe.synthetic_league(n_teams=14, seasons=2, seed=1)["matches"],
+                min_train=300, half_lives=(180.0,), regs=(1.0,))))
+
+
+def _raises_value_error(fn):
+    try:
+        fn()
+    except ValueError:
+        return True
+    return False
+
+
+def _corr(x, y):
+    n = len(x)
+    mx, my = sum(x) / n, sum(y) / n
+    num = sum((a - mx) * (b - my) for a, b in zip(x, y))
+    dx = math.sqrt(sum((a - mx) ** 2 for a in x))
+    dy = math.sqrt(sum((b - my) ** 2 for b in y))
+    return num / (dx * dy) if dx and dy else 0.0
+
+
 def audit_crossrefs(a):
     a.section("5. Renvois entre fichiers")
     src = os.path.join(ROOT, "sources")
@@ -434,19 +569,31 @@ def audit_end_to_end(a):
             "avantage terrain %.3f" % model.home_adv)
 
     nxt = future[0]
+    priced = fe.price_match(model=model, home=nxt["home"], away=nxt["away"],
+                            rho=model.rho, w_market=0.55,
+                            market={"1x2": [nxt["odds_h"], nxt["odds_d"],
+                                            nxt["odds_a"]]})
+    fair_under = priced["book"]["over_under"]["2.50"]["under"]["fair_odds"]
     res = fe.price_match(model=model, home=nxt["home"], away=nxt["away"],
                          rho=model.rho, w_market=0.55,
                          market={"1x2": [nxt["odds_h"], nxt["odds_d"], nxt["odds_a"]]},
                          offered={"1x2": {"home": nxt["odds_h"] * 1.08,
                                           "draw": nxt["odds_d"],
                                           "away": nxt["odds_a"]},
-                                  "ou": {"2.5": {"over": 1.95, "under": 1.95}}},
+                                  # prix franchement genereux : +30 % sur la
+                                  # cote juste, il doit etre detecte
+                                  "ou": {"2.5": {"under": fair_under * 1.30,
+                                                 "over": 1.95}}},
                          bankroll=2000, kelly_fraction=0.20, min_edge=0.03)
     a.check("e2e", "2. tarification : 1X2 somme a 1",
             abs(sum(res["book"]["1x2"][k]["prob"]
                     for k in ("home", "draw", "away")) - 1) < 1e-9)
-    a.check("e2e", "3. detection de valeur sur la cote bonifiee",
-            any(v["value"] for v in res["value_bets"]))
+    detected = [v for v in res["value_bets"] if v["value"]]
+    a.check("e2e", "3. detection de valeur sur un prix genereux de +30 %",
+            any(v["label"].startswith("O/U 2.5 under") for v in detected),
+            "detectes : %s" % [v["label"] for v in detected])
+    a.check("e2e", "3b. le critere z ecarte les avantages fragiles",
+            all(v["edge_z"] >= 1.0 for v in detected))
     a.check("e2e", "4. plan de mise dans les plafonds",
             res["stake_plan"]["total_exposure"] <= 0.10 + 1e-9,
             "exposition %.3f" % res["stake_plan"]["total_exposure"])
@@ -506,6 +653,7 @@ def main():
     audit_claims(a)
     audit_live(a)
     audit_journal(a)
+    audit_new_capabilities(a)
     audit_crossrefs(a)
     audit_data(a)
     audit_end_to_end(a)

@@ -220,7 +220,49 @@ Classement par avantage résiduel accessible, du plus au moins favorable :
 
 ---
 
-## 9. Contraintes de compte
+## 9. Comparer les opérateurs, correctement
+
+Un professionnel ne joue jamais une cote moyenne : il joue **la meilleure
+disponible**. Le moteur accepte donc, pour chaque marché, un dictionnaire
+`{opérateur: cote}` au lieu d'un nombre :
+
+```python
+offered = {"1x2": {"home": {"BookA": 2.42, "BookB": 2.55, "BookC": 2.38},
+                   "draw": 3.40, "away": 3.10}}
+```
+
+Il retient la meilleure, indique l'opérateur, et calcule le **gain de
+comparaison** par rapport à la cote médiane. Sur l'exemple ci-dessus,
+2,55 contre une médiane de 2,42 : +5,4 % de cote, soit environ 5 points
+d'espérance ajoutés sans rien changer au modèle. Comparer les prix est le
+seul avantage disponible sans aucune compétence de modélisation — et c'est
+souvent le plus gros.
+
+**Deux lectures de la dispersion entre opérateurs :**
+
+| Observation | Interprétation |
+|---|---|
+| Écart modéré, meilleur prix chez un opérateur de détail | Opportunité normale, jouer |
+| Un opérateur très au-dessus de tous les autres | Erreur de saisie ou information manquante — vérifier avant de miser |
+| Dispersion qui s'effondre à l'approche du coup d'envoi | Le marché converge : votre fenêtre se referme |
+
+**Consensus, jamais moyenne de cotes.** Pour agréger plusieurs opérateurs de
+référence, il faut déviguer **chacun séparément**, puis mettre en commun les
+probabilités :
+
+```python
+c = fe.consensus_probs([[2.10, 3.40, 3.60], [2.05, 3.50, 3.70]])
+c["probs"]        # pooling log-lineaire des probabilites deviguees
+c["max_spread"]   # desaccord entre operateurs -> entre dans sigma
+```
+
+Moyenner les **cotes brutes** serait une faute : la marge de chaque opérateur
+se retrouverait dans le résultat, et l'agrégat serait plus cher que chacune
+de ses composantes.
+
+---
+
+## 10. Contraintes de compte
 
 Factuel, sans stratégie de contournement :
 

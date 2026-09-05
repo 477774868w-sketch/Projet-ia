@@ -246,6 +246,94 @@ def table_live():
     return "\n".join(out)
 
 
+def _corr(x, y):
+    n = len(x)
+    mx, my = sum(x) / n, sum(y) / n
+    num = sum((a - mx) * (b - my) for a, b in zip(x, y))
+    dx = math.sqrt(sum((a - mx) ** 2 for a in x))
+    dy = math.sqrt(sum((b - my) ** 2 for b in y))
+    return num / (dx * dy) if dx and dy else 0.0
+
+
+def table_joint():
+    pyr = fe.synthetic_pyramid(n_per_div=14, seasons=4, seed=7)
+    teams = pyr["teams"]
+    truth = [pyr["att"][t] - pyr["def"][t] for t in teams]
+    joint = fe.fit_dixon_coles(pyr["matches"], half_life_days=1e6, reg=0.6,
+                               max_iter=800)
+    c_joint = _corr(truth, [joint.att[t] - joint.dfn[t] for t in teams])
+    sep = {lg: fe.fit_dixon_coles(
+        [m for m in pyr["matches"] if m["league"] == lg],
+        half_life_days=1e6, reg=0.6, max_iter=800) for lg in ("D1", "D2")}
+    nv, tv = [], []
+    for t in teams:
+        lg = joint.league_of(t)
+        if t in sep[lg].att:
+            nv.append(sep[lg].att[t] - sep[lg].dfn[t])
+            tv.append(pyr["att"][t] - pyr["def"][t])
+    c_sep = _corr(tv, nv)
+    return "\n".join([
+        "Pyramide synthétique : 2 divisions × 14 équipes, 4 saisons, "
+        "montées et descentes réelles (%d matchs)." % len(pyr["matches"]), "",
+        "| Approche | Corrélation des notes avec la vérité, **toutes divisions confondues** |",
+        "|---|---|",
+        "| Un ajustement par championnat, notes concaténées | **%.3f** |" % c_sep,
+        "| Ajustement conjoint, notes globales | **%.3f** |" % c_joint,
+    ])
+
+
+def table_fisher():
+    out = ["| Volume de données | Écart-type sur log(λ) | Rapport au précédent |",
+           "|---|---|---|"]
+    prev = None
+    for seasons in (1, 2, 4, 8):
+        syn = fe.synthetic_league(n_teams=16, seasons=seasons, seed=3)
+        m = fe.fit_dixon_coles(syn["matches"], half_life_days=1e6, reg=0.6,
+                               max_iter=400)
+        sd = math.sqrt(m.lambda_uncertainty(syn["teams"][0], syn["teams"][1])[0])
+        out.append("| %d saison(s), %d matchs | %.4f | %s |"
+                   % (seasons, len(syn["matches"]), sd,
+                      "—" if prev is None else "%.2f" % (prev / sd)))
+        prev = sd
+    return "\n".join(out)
+
+
+def table_calibration():
+    def sample(power, n=3000, seed=5, base=(0.50, 0.28, 0.22)):
+        rng = random.Random(seed)
+        preds, ys = [], []
+        for _ in range(n):
+            q = [x ** power for x in base]
+            s = sum(q)
+            preds.append([x / s for x in q])
+            u, cum, y = rng.random(), 0.0, 2
+            for k, x in enumerate(base):
+                cum += x
+                if u < cum:
+                    y = k
+                    break
+            ys.append(y)
+        return preds, ys
+
+    def ece(preds, ys):
+        return fe.reliability_bins([(p[k], 1 if y == k else 0)
+                                    for p, y in zip(preds, ys)
+                                    for k in range(3)])["ece"]
+
+    out = ["| Cas témoin | Température estimée | ECE avant | ECE après | Log-perte |",
+           "|---|---|---|---|---|"]
+    for power, label in ((1.6, "modèle sur-confiant (exposant 1,6)"),
+                         (1.0, "modèle déjà calibré"),
+                         (0.7, "modèle sous-confiant (exposant 0,7)")):
+        preds, ys = sample(power)
+        cal = fe.fit_calibration(preds, ys)
+        out.append("| %s | **%.3f** | %.4f | %.4f | %+.5f |"
+                   % (label, cal.temperature, ece(preds, ys),
+                      ece([cal.apply(p) for p in preds], ys),
+                      cal.meta["log_loss_before"] - cal.meta["log_loss_after"]))
+    return "\n".join(out)
+
+
 TABLES = {
     "A": (table_A, "sources/02_MOTEUR_QUANTITATIF.md"),
     "B": (table_B, "sources/02_MOTEUR_QUANTITATIF.md"),
@@ -256,6 +344,9 @@ TABLES = {
     "dispersion": (table_dispersion, "sources/05_D2_ET_FEMININ.md"),
     "parlay": (table_parlay, "sources/09_MARCHES_FORMULES.md"),
     "live": (table_live, "sources/09_MARCHES_FORMULES.md"),
+    "joint": (table_joint, "sources/05_D2_ET_FEMININ.md"),
+    "fisher": (table_fisher, "sources/02_MOTEUR_QUANTITATIF.md"),
+    "calibration": (table_calibration, "sources/08_CALIBRATION_AUDIT.md"),
 }
 
 

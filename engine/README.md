@@ -25,16 +25,18 @@ python3 footyedge.py --help       # toutes les commandes
 | 4 | Inversion du marché | `lambdas_from_1x2`, `lambdas_from_asian` |
 | 5 | Fusion | `log_pool`, `blend_lambdas` |
 | 6 | Mi-temps | `halves_analysis` |
-| 7 | Estimation des forces | `fit_dixon_coles`, `DixonColesModel` |
+| 7 | Estimation des forces (multi-championnats, information de Fisher) | `fit_dixon_coles`, `DixonColesModel.covariance` |
 | 8 | Elo à buts | `EloRatings` |
 | 9 | Mise | `kelly_single`, `kelly_asian`, `kelly_exclusive`, `stake_plan` |
 | 10 | Métriques | `rps`, `brier_multiclass`, `reliability_bins`, `clv` |
-| 11 | Tarification complète | `price_match`, `build_book`, `scan_value` |
+| 11 | Tarification complete | `price_match`, `build_book`, `scan_value`, `best_price`, `probability_sigma`, `break_even_shift` |
 | 11b | Rendu lisible | `render_match` |
 | 11c | Réévaluation en direct | `live_grid`, `remaining_share` |
 | 12 | Monte-Carlo | `simulate_season`, `simulate_parlay` |
 | 13 | Entrées/sorties CSV | `load_matches_csv`, `load_bets_log` |
 | 13b | Audit du journal | `analyse_log`, `render_log_report` |
+| 13c | Recalibration | `Calibrator`, `fit_calibration` |
+| 13d | Reglage automatique | `tune_hyperparameters` |
 | 14 | Backtest | `backtest` |
 | 15 | Données synthétiques | `synthetic_league`, `add_synthetic_odds` |
 | 16 | Auto-test | `selftest` |
@@ -74,6 +76,13 @@ print(fe.render_match(res, "Domicile", "Extérieur"))
   probabilités positives.
 - **Sortie JSON** : toutes les commandes renvoient du JSON par défaut ;
   `--brief` produit la fiche lisible sur `price` et `predict`.
+- **Cotes multi-opérateurs** : partout où une cote est attendue, un
+  dictionnaire `{opérateur: cote}` est accepté ; la meilleure est retenue.
+- **`league`** : présent dans les données, il déclenche l'ajustement conjoint
+  multi-divisions. Absent, le modèle se réduit exactement au cas simple.
+- **Information de Fisher** : conservée par `fit_dixon_coles` (désactivable
+  via `with_uncertainty=False`), **non sérialisée** — un modèle rechargé
+  depuis un JSON renvoie `None` plutôt qu'une fausse certitude.
 
 ## Performance (Python pur, sans accélération)
 

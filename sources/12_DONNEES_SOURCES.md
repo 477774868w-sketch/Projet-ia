@@ -23,6 +23,17 @@ collecter, sous quelle forme, et comment vérifier que c'est exploitable.
 pèsent presque plus rien avec une demi-vie de 180 jours — inutile de les
 charger.
 
+> **Le conseil qui change le plus de choses : un seul fichier par pays,
+> toutes divisions confondues.** Avec une colonne `Div` (ou `league`), le
+> moteur ajuste les divisions **ensemble** et produit des notes comparables
+> entre elles : un promu garde son historique, un match de coupe entre
+> divisions se tarifie, et l'écart de niveau devient une sortie mesurée
+> (`02_MOTEUR_QUANTITATIF.md` §5 bis). Sur une pyramide synthétique, la
+> corrélation avec la vérité passe de 0,72 à 0,94.
+>
+> Condition : il doit exister un **chemin** entre les divisions — montées,
+> descentes ou matchs de coupe. Sans lien, les échelles restent arbitraires.
+
 ---
 
 ## 2. Schéma CSV attendu
@@ -99,7 +110,11 @@ print(len(matches), matches[0]["date"], matches[-1]["date"])
 6. **Doublons** — même date et mêmes équipes : supprimer.
 7. **Cohérence des priors** — la moyenne de buts du fichier doit être proche
    du prior du championnat. Un écart de plus de 0,3 but signale un mélange de
-   divisions ou de compétitions.
+   compétitions **non étiqueté** : avec une colonne `league` correcte, le
+   mélange est voulu et le moteur le gère ; sans elle, il fausse tout.
+8. **Ponts entre divisions** — si vous ajustez plusieurs divisions ensemble,
+   vérifier qu'au moins quelques équipes changent de division sur la période,
+   ou que des matchs de coupe les relient. Sans pont, `θ` est arbitraire.
 
 ---
 
@@ -138,6 +153,7 @@ homonymes ; clubs ayant changé de nom ou fusionné en cours d'historique.
 |---|---|
 | Après chaque journée | Ajouter les résultats, relever les cotes de clôture |
 | Hebdomadaire | Réajuster le modèle (`/fit`) |
+| Mensuelle | Vérifier que les hyperparamètres tiennent (`/tune` sur la fenêtre récente) |
 | Mensuelle | Contrôles qualité §4, revue des noms d'équipes |
 | Mercato d'hiver | Réduire la demi-vie, réexaminer les équipes les plus touchées |
 | Intersaison | Refit complet, régression des notes, révision des priors et des paliers |
@@ -148,8 +164,10 @@ homonymes ; clubs ayant changé de nom ou fusionné en cours d'historique.
 
 ```
 data/
-  history/               # historiques par championnat (hors dépôt Git)
-    ENG1.csv  FRA2.csv  WENG1.csv  ...
+  history/               # historiques (hors dépôt Git)
+    france.csv           # D1 + D2 dans le MEME fichier, colonne Div
+    angleterre.csv       # idem : Premier League + Championship + League One
+    feminin_europe.csv   # ...
   live/                  # relevés de cotes de la journée
   league_priors.csv      # priors par championnat (versionné)
   matches_template.csv   # schéma vierge

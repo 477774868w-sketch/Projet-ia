@@ -40,19 +40,40 @@ intensités de buts. On obtient l'avis du marché dans la même unité que le
 modèle, et on peut alors tarifer les marchés dérivés que l'opérateur affiche
 mal.
 
-**Il sait ce qu'il ne sait pas.** Chaque probabilité porte un σ construit sur
-le désaccord modèle/marché, la dispersion inter-méthodes de devig et le volume
-de données. La mise décroît quand σ croît, et une pénalité s'applique
-automatiquement quand le modèle s'écarte trop du marché.
+**Il sait ce qu'il ne sait pas.** Le moteur conserve l'information de Fisher
+observée : l'incertitude d'estimation de chaque note est calculée, pas
+devinée, puis propagée à la probabilité de chaque marché. Une équipe vue 6
+fois est 2,4× plus incertaine qu'une équipe vue 72 fois — **et la mise
+s'ajuste toute seule**, sans règle supplémentaire. S'y ajoutent la dispersion
+inter-méthodes de devig et une pénalité automatique quand le modèle s'écarte
+trop du marché.
+
+**Il compare les divisions, pas seulement les équipes.** Chargez D1 et D2 dans
+le même fichier : les notes deviennent globales, un promu garde son
+historique, et un match de coupe entre divisions se tarifie. Sur une pyramide
+synthétique, la corrélation avec la vérité passe de **0,72** (deux ajustements
+séparés) à **0,94** (ajustement conjoint).
+
+**Il règle ses propres paramètres.** `tune` balaie demi-vie × rétrécissement ×
+poids du marché en validation temporelle et renvoie la configuration qui
+minimise le RPS hors échantillon — au lieu de vous faire deviner.
 
 **Il mise comme un gestionnaire de risque.** Kelly fractionnaire, variante
 exacte pour les issues mutuellement exclusives (cas d'arbitrage compris),
 décote de corrélation, plafonds par pari / par match / par journée / au total,
 paliers de réduction en drawdown.
 
-**Il se mesure.** Backtest à fenêtre glissante sans fuite d'information, RPS
-comparé au marché, courbes de calibration et ECE, CLV, intervalles bootstrap,
-taille d'échantillon requise, critères d'arrêt écrits à l'avance.
+**Il se mesure, puis se corrige.** Backtest à fenêtre glissante sans fuite,
+RPS comparé au marché, courbes de calibration et ECE, CLV, intervalles
+bootstrap, taille d'échantillon requise, critères d'arrêt écrits à l'avance.
+Et si la calibration est mauvaise, une recalibration (mise à l'échelle
+vectorielle) ajustée **sur les seules prédictions passées** la corrige — le
+rapport donne les métriques avant et après, pour que la décision soit mesurée.
+
+**Il joue le meilleur prix.** Donnez plusieurs opérateurs par marché : le
+moteur retient la meilleure cote, nomme l'opérateur et chiffre le gain par
+rapport à la médiane. Et chaque pari retenu porte son **seuil de bascule** —
+de combien le total du match doit bouger pour que l'avantage disparaisse.
 
 **Il traite les compétitions négligées comme un sujet à part entière.** Les
 deuxièmes divisions et le football féminin ont leurs propres réglages :
@@ -77,8 +98,8 @@ Voir **[DEMARRAGE_RAPIDE.md](DEMARRAGE_RAPIDE.md)** pour la version détaillée.
 ### 2. Vérifier le moteur
 
 ```bash
-python3 engine/footyedge.py selftest     # 218 contrôles d'intégrité
-python3 tests/test_footyedge.py          # 69 tests indépendants
+python3 engine/footyedge.py selftest     # 246 contrôles d'intégrité
+python3 tests/test_footyedge.py          # 95 tests indépendants
 python3 engine/footyedge.py demo         # démonstration guidée
 ```
 
@@ -107,16 +128,21 @@ python3 engine/footyedge.py invert --ah -0.5 1.95 1.95 --ou 2.5 1.90 1.98
 python3 engine/footyedge.py price --lh 1.55 --la 1.15 --market-1x2 2.20 3.40 3.30 \
     --offered data/offered_template.json --brief
 
-# Ajuster un modèle sur un historique
-python3 engine/footyedge.py fit --csv data/history/ligue2.csv --out model_l2.json
+# Ajuster un modèle (plusieurs divisions ensemble si la colonne league existe)
+python3 engine/footyedge.py fit --csv data/history/france.csv --out model_fr.json
+python3 engine/footyedge.py table --model model_fr.json    # niveau des divisions
+
+# Régler demi-vie, rétrécissement et poids du marché par RPS hors échantillon
+python3 engine/footyedge.py tune --csv data/history/ligue2.csv \
+    --half-lives 90 150 240 360 --regs 0.5 1 2
 
 # Tarifer un match du modèle
-python3 engine/footyedge.py predict --model model_l2.json \
+python3 engine/footyedge.py predict --model model_fr.json \
     --home Guingamp --away Amiens --market-1x2 2.45 3.30 3.10 --w 0.5 --brief
 
 # Validation temporelle + simulation de mise
 python3 engine/footyedge.py backtest --csv data/history/ligue2.csv \
-    --min-train 300 --w 0.5 --out audit.json --bets-out paris.csv
+    --min-train 300 --w 0.5 --calibrate --out audit.json --bets-out paris.csv
 
 # Réévaluation en cours de match (63e minute, 1-0, rouge pour l'extérieur)
 python3 engine/footyedge.py live --lh 1.60 --la 1.10 --minute 63 \
@@ -151,13 +177,13 @@ sources/                      ← à déposer dans le Projet
   12_DONNEES_SOURCES.md       schémas CSV, qualité, cadence
   13_LEXIQUE.md               vocabulaire
 
-engine/footyedge.py           moteur, zéro dépendance, ~3 150 lignes
+engine/footyedge.py           moteur, zéro dépendance, ~4 000 lignes
 engine/README.md              organisation du moteur, conventions, performances
-tests/test_footyedge.py       69 tests indépendants
+tests/test_footyedge.py       95 tests indépendants
 data/                         priors de 55 compétitions + modèles de fichiers
 scripts/generate_priors.py    régénère data/league_priors.csv
 scripts/generate_tables.py    régénère les tables chiffrées de sources/
-scripts/audit.py              audit complet du dépôt (79 contrôles)
+scripts/audit.py              audit complet du dépôt (107 contrôles)
 AUDIT.md                      rapport d'audit, limites, recommandations
 ```
 
@@ -167,7 +193,7 @@ AUDIT.md                      rapport d'audit, limites, recommandations
 python3 scripts/audit.py
 ```
 
-366 contrôles au total : intégrité mathématique du moteur, fonctionnement de
+448 contrôles au total : intégrité mathématique du moteur, fonctionnement de
 toutes les commandes, **conformité des tables de la documentation au code**,
 exactitude des affirmations chiffrées, renvois entre fichiers, validité des
 données, et un scénario complet de bout en bout.

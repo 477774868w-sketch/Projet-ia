@@ -8,7 +8,7 @@
 python3 engine/footyedge.py selftest
 ```
 
-Attendu : `Resultat : 218/218 tests reussis`. Aucune installation nécessaire :
+Attendu : `Resultat : 246/246 tests reussis`. Aucune installation nécessaire :
 le moteur n'utilise que la bibliothèque standard de Python 3.8+.
 
 ```bash
@@ -80,12 +80,26 @@ mkdir -p data/history
 # deposer par exemple data/history/ligue2.csv
 ```
 
-### 4.2 Ajuster le modèle
+### 4.2 Régler, puis ajuster
+
+Ne devinez pas les hyperparamètres — mesurez-les :
+
+```bash
+python3 engine/footyedge.py tune --csv data/history/ligue2.csv \
+    --half-lives 90 150 240 360 --regs 0.5 1 2
+```
+
+Puis ajustez avec la configuration retenue :
 
 ```bash
 python3 engine/footyedge.py fit --csv data/history/ligue2.csv \
-    --out model_l2.json --half-life 180 --reg 1.0 --top 20
+    --out model_l2.json --half-life 240 --reg 1.0 --top 20
 ```
+
+**Conseil qui change beaucoup de choses** : mettez toutes les divisions d'un
+même pays dans un seul fichier, avec une colonne `Div` ou `league`. Les notes
+deviennent comparables entre divisions, les promus gardent leur historique et
+les matchs de coupe se tarifient.
 
 Contrôler la sortie avec `sources/02_MOTEUR_QUANTITATIF.md` §9 :
 `home_adv` entre 0,15 et 0,30 · `rho` entre −0,15 et 0 · étendue des notes
@@ -144,6 +158,7 @@ Détails et justifications : `sources/05_D2_ET_FEMININ.md`.
 | Après la journée | Compléter le journal (CLV, résultats) |
 | Toutes les 50 lignes | `/calib` (`footyedge.py calib --log …`) |
 | Toutes les 200 lignes | `/audit` + décision écrite |
+| Chaque intersaison | `/tune` sur la saison écoulée, puis refit |
 
 ---
 

@@ -391,6 +391,364 @@ def test_elo_tracks_dixon_coles():
     assert c > 0.85, c
 
 
+# ------------------------------------------------------- multi-championnats
+
+def test_joint_fit_makes_ratings_comparable_across_divisions():
+    pyr = fe.synthetic_pyramid(n_per_div=14, seasons=4, seed=7)
+    joint = fe.fit_dixon_coles(pyr["matches"], half_life_days=1e6, reg=0.6,
+                               max_iter=800)
+    teams = pyr["teams"]
+    c_joint = _corr([pyr["att"][t] - pyr["def"][t] for t in teams],
+                    [joint.att[t] - joint.dfn[t] for t in teams])
+    sep = {lg: fe.fit_dixon_coles(
+        [m for m in pyr["matches"] if m["league"] == lg],
+        half_life_days=1e6, reg=0.6, max_iter=800) for lg in ("D1", "D2")}
+    naive, truth = [], []
+    for t in teams:
+        lg = joint.league_of(t)
+        if t in sep[lg].att:
+            naive.append(sep[lg].att[t] - sep[lg].dfn[t])
+            truth.append(pyr["att"][t] - pyr["def"][t])
+    c_sep = _corr(truth, naive)
+    assert c_joint > 0.88, c_joint
+    assert c_joint > c_sep + 0.05, (c_joint, c_sep)
+
+
+def test_league_offsets_have_the_right_sign_and_order():
+    pyr = fe.synthetic_pyramid(n_per_div=12, seasons=3, seed=13, theta_gap=-0.20)
+    m = fe.fit_dixon_coles(pyr["matches"], half_life_days=1e6, reg=0.8, max_iter=700)
+    assert m.theta["D2"] < m.theta["D1"]
+    tbl = m.league_table()
+    assert tbl[0]["league"] == "D1"
+    assert tbl[0]["goal_level"] > tbl[1]["goal_level"]
+
+
+def test_single_league_reduces_to_the_simple_model():
+    syn = fe.synthetic_league(n_teams=12, seasons=1, seed=4)
+    m = fe.fit_dixon_coles(syn["matches"], max_iter=200)
+    assert len(m.leagues) == 1
+    assert abs(m.theta[m.leagues[0]]) < 1e-9
+    assert abs(m.delta[m.leagues[0]]) < 1e-9
+
+
+def test_league_argument_projects_a_team_into_another_division():
+    """
+    Changer de championnat deplace le NIVEAU DE BUTS (theta) et l'AVANTAGE DU
+    TERRAIN (delta), jamais la force relative des equipes.
+
+    Consequence exacte : sur terrain neutre le rapport des intensites est
+    strictement conserve ; avec avantage du terrain il est multiplie par
+    exp(delta_A - delta_B). Rien d'autre ne doit bouger.
+    """
+    pyr = fe.synthetic_pyramid(n_per_div=12, seasons=3, seed=17)
+    m = fe.fit_dixon_coles(pyr["matches"], max_iter=400)
+    a, b = [t for t in m.teams if m.league_of(t) == "D1"][:2]
+
+    n1 = m.lambdas(a, b, neutral=True, league="D1")
+    n2 = m.lambdas(a, b, neutral=True, league="D2")
+    assert abs((n1[0] / n1[1]) - (n2[0] / n2[1])) < 1e-12      # force relative intacte
+    ratio = n1[0] / n2[0]
+    assert abs(ratio - n1[1] / n2[1]) < 1e-12                  # les deux cotes bougent pareil
+    assert abs(math.log(ratio) - (m.theta["D1"] - m.theta["D2"])) < 1e-12
+
+    h1 = m.lambdas(a, b, league="D1")
+    h2 = m.lambdas(a, b, league="D2")
+    assert h1 != h2
+    expected = math.exp(m.delta["D1"] - m.delta["D2"])
+    assert abs((h1[0] / h1[1]) / (h2[0] / h2[1]) - expected) < 1e-12
+
+
+# -------------------------------------------------------------- incertitude
+
+def test_fisher_uncertainty_shrinks_with_data():
+    sigmas = []
+    for seasons in (1, 4):
+        syn = fe.synthetic_league(n_teams=14, seasons=seasons, seed=3)
+        m = fe.fit_dixon_coles(syn["matches"], half_life_days=1e6, reg=0.6,
+                               max_iter=400)
+        sigmas.append(math.sqrt(m.lambda_uncertainty("T00", "T01")[0]))
+    assert sigmas[1] < sigmas[0]
+    assert 1.4 < sigmas[0] / sigmas[1] < 3.0        # ordre de grandeur 1/sqrt(n)
+
+
+def test_fisher_uncertainty_is_larger_for_rarely_seen_teams():
+    syn = fe.synthetic_league(n_teams=14, seasons=3, seed=5)
+    rare, kept, seen = syn["teams"][0], [], 0
+    for m in syn["matches"]:
+        if rare in (m["home"], m["away"]):
+            seen += 1
+            if seen > 6:
+                continue
+        kept.append(m)
+    model = fe.fit_dixon_coles(kept, half_life_days=1e6, reg=0.6, max_iter=500)
+    s_rare = math.sqrt(model.lambda_uncertainty(rare, syn["teams"][1])[0])
+    s_norm = math.sqrt(model.lambda_uncertainty(syn["teams"][1], syn["teams"][2])[0])
+    assert s_rare > 1.5 * s_norm, (s_rare, s_norm)
+
+
+def test_covariance_is_symmetric_positive_definite_on_the_diagonal():
+    syn = fe.synthetic_league(n_teams=10, seasons=2, seed=8)
+    m = fe.fit_dixon_coles(syn["matches"], max_iter=300)
+    cov = m.covariance()
+    n = len(cov)
+    assert all(abs(cov[i][j] - cov[j][i]) < 1e-8 for i in range(n) for j in range(n))
+    assert all(cov[i][i] > 0 for i in range(n))
+
+
+def test_probability_sigma_is_positive_and_bounded():
+    syn = fe.synthetic_league(n_teams=12, seasons=2, seed=9)
+    m = fe.fit_dixon_coles(syn["matches"], max_iter=300)
+    for fn in (lambda g: g.result_probs()[0],
+               lambda g: g.over_under(2.5)["over"]["win"],
+               lambda g: g.btts()["yes"]):
+        s = fe.probability_sigma(m, "T00", "T01", fn)
+        assert 0.0 < s < 0.25, s
+
+
+def test_serialised_model_reports_no_uncertainty_rather_than_lying():
+    syn = fe.synthetic_league(n_teams=10, seasons=1, seed=2)
+    m = fe.DixonColesModel.from_dict(
+        fe.fit_dixon_coles(syn["matches"], max_iter=200).to_dict())
+    assert m.covariance() is None
+    assert m.lambda_uncertainty("T00", "T01") is None
+    assert fe.probability_sigma(m, "T00", "T01", lambda g: g.result_probs()[0]) is None
+
+
+def test_uncertainty_can_be_switched_off():
+    syn = fe.synthetic_league(n_teams=10, seasons=1, seed=2)
+    m = fe.fit_dixon_coles(syn["matches"], max_iter=100, with_uncertainty=False)
+    assert m.lambda_uncertainty("T00", "T01") is None
+
+
+def test_delta_method_matches_direct_simulation():
+    """
+    Verification de l'approximation lineaire : on simule directement
+    (log lambda_dom, log lambda_ext) dans leur loi normale bivariee et on
+    compare l'ecart-type obtenu a celui de la methode delta.
+    """
+    syn = fe.synthetic_league(n_teams=16, seasons=3, seed=41)
+    m = fe.fit_dixon_coles(syn["matches"], half_life_days=1e6, reg=0.8,
+                           max_iter=600)
+    var_h, var_a, cov = m.lambda_uncertainty("T00", "T01")
+    lh, la = m.lambdas("T00", "T01")
+    sd_h, sd_a = math.sqrt(var_h), math.sqrt(var_a)
+    rho_c = cov / (sd_h * sd_a)
+    rng = random.Random(7)
+    for fn in (lambda g: g.result_probs()[0],
+               lambda g: g.over_under(2.5)["over"]["win"],
+               lambda g: g.btts()["yes"],
+               lambda g: g.asian_handicap(-0.5)["home"]["prob_norm"]):
+        xs = []
+        for _ in range(3000):
+            z1, z2 = rng.gauss(0, 1), rng.gauss(0, 1)
+            dh = sd_h * z1
+            da = sd_a * (rho_c * z1 + math.sqrt(max(1 - rho_c ** 2, 0.0)) * z2)
+            xs.append(fn(fe.ScoreGrid.from_lambdas(lh * math.exp(dh),
+                                                   la * math.exp(da), m.rho)))
+        mean = sum(xs) / len(xs)
+        sd = math.sqrt(sum((x - mean) ** 2 for x in xs) / (len(xs) - 1))
+        delta = fe.probability_sigma(m, "T00", "T01", fn)
+        assert abs(delta - sd) / sd < 0.06, (delta, sd)
+
+
+def test_regularisation_ridge_does_not_affect_identified_contrasts():
+    """
+    La crete ajoutee sur mu, l'avantage du terrain et les decalages de
+    championnat ne sert qu'a rendre J inversible dans les directions que seul
+    le centrage identifie. L'incertitude d'un lambda reel ne doit pas en
+    dependre — on le verifie sur quatre ordres de grandeur.
+    """
+    syn = fe.synthetic_league(n_teams=14, seasons=2, seed=41)
+    sigmas = []
+    for ridge in (1e-3, 1e-4, 1e-5, 1e-6):
+        m = fe.fit_dixon_coles(syn["matches"], half_life_days=1e6, reg=0.8,
+                               max_iter=400)
+        J, ix = m._fisher["matrix"], m._fisher["index"]
+        tw = m.meta["total_weight"]
+        keys = ["mu", "hfa"] + [k for k in ix
+                                if isinstance(k, tuple) and k[0] == "theta"]
+        for k in keys:
+            J[ix[k]][ix[k]] += (ridge - 1e-4) * tw
+        m._cov = None
+        sigmas.append(math.sqrt(m.lambda_uncertainty("T00", "T01")[0]))
+    # variation relative sur quatre ordres de grandeur de crete
+    spread = (max(sigmas) - min(sigmas)) / (sum(sigmas) / len(sigmas))
+    assert spread < 1e-4, (spread, sigmas)
+
+
+def test_market_weight_shrinks_model_uncertainty():
+    """Apres fusion, seule la fraction (1-w) de log(lambda) vient du modele."""
+    syn = fe.synthetic_league(n_teams=14, seasons=2, seed=12)
+    m = fe.fit_dixon_coles(syn["matches"], max_iter=400)
+    fn = lambda g: g.result_probs()[0]
+    full = fe.probability_sigma(m, "T00", "T01", fn, weight=1.0)
+    half = fe.probability_sigma(m, "T00", "T01", fn, weight=0.5)
+    none = fe.probability_sigma(m, "T00", "T01", fn, weight=0.0)
+    assert abs(half - 0.5 * full) < 1e-9
+    assert none == 0.0
+
+
+# ------------------------------------------------------------ recalibration
+
+def _sharpened_sample(power, n=1500, seed=5, base=(0.50, 0.28, 0.22)):
+    rng = random.Random(seed)
+    preds, ys = [], []
+    for _ in range(n):
+        q = [x ** power for x in base]
+        s = sum(q)
+        preds.append([x / s for x in q])
+        u, cum, y = rng.random(), 0.0, 2
+        for k, x in enumerate(base):
+            cum += x
+            if u < cum:
+                y = k
+                break
+        ys.append(y)
+    return preds, ys
+
+
+def test_calibration_detects_and_fixes_overconfidence():
+    preds, ys = _sharpened_sample(1.6)
+    cal = fe.fit_calibration(preds, ys)
+    assert cal.temperature > 1.15, cal.temperature
+    assert cal.meta["log_loss_after"] < cal.meta["log_loss_before"]
+    ece_before = fe.reliability_bins(
+        [(p[k], 1 if y == k else 0) for p, y in zip(preds, ys) for k in range(3)])["ece"]
+    ece_after = fe.reliability_bins(
+        [(cal.apply(p)[k], 1 if y == k else 0)
+         for p, y in zip(preds, ys) for k in range(3)])["ece"]
+    assert ece_after < ece_before / 2.0, (ece_before, ece_after)
+
+
+def test_calibration_leaves_a_calibrated_model_almost_alone():
+    preds, ys = _sharpened_sample(1.0, n=3000, seed=11)
+    cal = fe.fit_calibration(preds, ys)
+    assert 0.85 < cal.temperature < 1.20, cal.temperature
+
+
+def test_calibration_corrects_a_draw_bias():
+    rng = random.Random(3)
+    true_p = [0.45, 0.30, 0.25]
+    preds, ys = [], []
+    for _ in range(3000):
+        preds.append([0.50, 0.22, 0.28])          # X sous-estime de 8 points
+        u, cum, y = rng.random(), 0.0, 2
+        for k, x in enumerate(true_p):
+            cum += x
+            if u < cum:
+                y = k
+                break
+        ys.append(y)
+    out = fe.fit_calibration(preds, ys).apply([0.50, 0.22, 0.28])
+    assert abs(out[1] - 0.30) < 0.03, out
+
+
+def test_calibration_is_a_valid_monotone_transform():
+    cal = fe.Calibrator(0.8, [0.1, -0.05, -0.05])
+    p = [0.5, 0.3, 0.2]
+    q = cal.apply(p)
+    assert abs(sum(q) - 1.0) < 1e-12
+    assert sorted(range(3), key=lambda i: -p[i]) == sorted(range(3), key=lambda i: -q[i])
+    assert fe.Calibrator().is_identity()
+    assert fe.Calibrator.from_dict(cal.to_dict()).apply(p) == q
+
+
+def test_calibration_refuses_tiny_samples():
+    cal = fe.fit_calibration([[0.5, 0.3, 0.2]] * 10, [0] * 10)
+    assert cal.is_identity() and cal.meta["fitted"] is False
+
+
+def test_backtest_calibration_is_reported_without_leakage():
+    syn = fe.synthetic_league(n_teams=14, seasons=3, seed=19)
+    fe.add_synthetic_odds(syn["matches"], att=syn["att"], dfn=syn["def"],
+                          mu=syn["mu"], hfa=syn["hfa"], noise=0.12)
+    bt = fe.backtest(syn["matches"], min_train=300, refit_every_days=60,
+                     max_iter=150, warm_iter=50, calibrate=True, calib_min=100)
+    s = bt["summary"]
+    assert "calibrated" in s["rps"] and s["calibration_after"] is not None
+    assert s["calibrator"] is not None
+    assert 0.0 < s["rps"]["calibrated"] < 0.35
+
+
+# ------------------------------------------------------- comparaison de prix
+
+def test_best_price_picks_the_best_book():
+    o, book, n, med = fe.best_price({"A": 2.10, "B": 2.25, "C": 2.05})
+    assert (o, book, n) == (2.25, "B", 3)
+    assert abs(med - 2.10) < 1e-12
+    assert fe.best_price(2.10)[0] == 2.10
+    assert fe.best_price({"A": 0.5})[0] is None
+    assert fe.best_price(None)[0] is None
+
+
+def test_scan_value_uses_the_best_available_price():
+    g = fe.ScoreGrid.from_lambdas(1.5, 1.2, -0.05)
+    rows = fe.scan_value(g, {"1x2": {"home": {"A": 2.10, "B": 2.60}}})
+    row = rows[0]
+    assert row["odds"] == 2.60 and row["book"] == "B"
+    assert row["n_books"] == 2 and row["shop_gain"] > 0
+
+
+def test_consensus_pools_devigged_probabilities():
+    c = fe.consensus_probs([[2.10, 3.40, 3.60], [2.05, 3.50, 3.70]])
+    assert abs(sum(c["probs"]) - 1.0) < 1e-9
+    lo = min(fe.devig([2.10, 3.40, 3.60])["probs"][0],
+             fe.devig([2.05, 3.50, 3.70])["probs"][0])
+    hi = max(fe.devig([2.10, 3.40, 3.60])["probs"][0],
+             fe.devig([2.05, 3.50, 3.70])["probs"][0])
+    assert lo - 1e-9 <= c["probs"][0] <= hi + 1e-9
+    assert c["n_books"] == 2 and c["max_spread"] > 0
+
+
+# ---------------------------------------------------------- seuil de bascule
+
+def test_break_even_shift_cancels_the_edge():
+    g = fe.ScoreGrid.from_lambdas(1.5, 1.2, -0.05)
+    fn = lambda gg: gg.over_under(2.5)["over"]["win"]
+    odds = 1.15 / fn(g)                                   # +15 % d'avantage
+    be = fe.break_even_shift(g, fn, odds)
+    assert be is not None
+    moved = fe.ScoreGrid.from_lambdas(g.lam_h * math.exp(be["log_shift"]),
+                                      g.lam_a * math.exp(be["log_shift"]), g.rho)
+    assert abs(fn(moved) * odds - 1.0) < 1e-3            # avantage annule
+    assert be["total_goals_shift"] < 0                   # un "over" meurt si le total baisse
+
+
+def test_break_even_returns_nothing_without_an_edge():
+    g = fe.ScoreGrid.from_lambdas(1.5, 1.2, -0.05)
+    fn = lambda gg: gg.btts()["yes"]
+    assert fe.break_even_shift(g, fn, 0.9 / fn(g)) is None
+
+
+# ------------------------------------------------------------------ reglage
+
+def test_tuning_finds_the_market_weight_that_minimises_rps():
+    syn = fe.synthetic_league(n_teams=16, seasons=3, seed=31)
+    fe.add_synthetic_odds(syn["matches"], att=syn["att"], dfn=syn["def"],
+                          mu=syn["mu"], hfa=syn["hfa"], noise=0.14)
+    res = fe.tune_hyperparameters(syn["matches"], half_lives=(200.0,),
+                                  regs=(1.0,), w_markets=(0.0, 0.5, 1.0),
+                                  min_train=400, refit_every_days=90,
+                                  max_iter=150, warm_iter=40)
+    assert res["best"] is not None
+    assert res["grid"] == sorted(res["grid"], key=lambda r: r["rps"])
+    pure_market = [r for r in res["grid"] if r["w_market"] == 1.0][0]
+    assert abs(pure_market["rps"] - res["market_rps"]) < 0.002
+    assert len(res["sensitivity"]["w_market"]) == 3
+
+
+def test_tuning_requires_odds():
+    """Sans cotes il n'y a pas de marche a ponderer : le reglage doit refuser."""
+    syn = fe.synthetic_league(n_teams=14, seasons=2, seed=1)   # 728 matchs
+    try:
+        fe.tune_hyperparameters(syn["matches"], min_train=300,
+                                half_lives=(180.0,), regs=(1.0,))
+    except ValueError as exc:
+        assert "marche" in str(exc), str(exc)
+        return
+    raise AssertionError("le reglage aurait du refuser")
+
+
 # ------------------------------------------------------------------ pipeline
 
 def test_price_match_blends_between_model_and_market():
