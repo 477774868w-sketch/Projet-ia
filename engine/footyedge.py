@@ -2008,6 +2008,246 @@ def write_json(obj, path=None):
 
 
 # --------------------------------------------------------------------------
+# 13 bis. Analyse du journal de paris
+# --------------------------------------------------------------------------
+
+LOG_ALIASES = {
+    "date": ["date"], "competition": ["competition", "league", "div"],
+    "match": ["match", "fixture"], "market": ["market", "marche"],
+    "selection": ["selection", "pick"],
+    "odds": ["odds_taken", "odds", "cote_prise", "cote"],
+    "prob": ["prob_model", "prob", "proba_modele", "probability"],
+    "stake": ["stake", "mise"], "pnl": ["pnl", "profit", "gain"],
+    "result": ["result", "resultat"],
+    "closing": ["closing_odds", "cote_cloture", "close_odds"],
+    "closing_fair": ["closing_fair_odds", "cote_cloture_devig", "close_fair"],
+    "clv": ["clv_fair", "clv"], "taken_at": ["taken_at", "heure_prise"],
+    "kickoff": ["kickoff", "coup_envoi"], "bankroll_after": ["bankroll_after"],
+}
+
+# Seuils de 08_CALIBRATION_AUDIT.md, appliques tels quels.
+CLV_BANDS = ((0.020, "avantage reel et exploitable"),
+             (0.005, "avantage probable, marge de securite faible"),
+             (-0.005, "aucun avantage demontre : vous payez la marge"),
+             (float("-inf"), "du mauvais cote : arreter et diagnostiquer"))
+ECE_BANDS = ((0.02, "excellent"), (0.04, "correct"),
+             (0.07, "recalibrage necessaire"),
+             (float("inf"), "modele non exploitable en l'etat"))
+
+
+def _band(value, bands, ascending=False):
+    if value is None:
+        return "non mesurable"
+    for threshold, label in bands:
+        if (value <= threshold) if ascending else (value >= threshold):
+            return label
+    return bands[-1][1]
+
+
+def load_bets_log(path, encoding="utf-8-sig"):
+    """Charge un journal de paris (schema de data/bets_log_template.csv)."""
+    rows = []
+    with open(path, "r", encoding=encoding, newline="") as fh:
+        reader = csv.DictReader(fh)
+        headers = {_norm(h): h for h in (reader.fieldnames or [])}
+        mapping = {}
+        for key, aliases in LOG_ALIASES.items():
+            for al in aliases:
+                if al in headers:
+                    mapping[key] = headers[al]
+                    break
+        missing = [k for k in ("odds", "stake") if k not in mapping]
+        if missing:
+            raise ValueError("journal inexploitable, colonnes manquantes : %s "
+                             "(entetes vues : %s)"
+                             % (missing, list(headers.values())[:15]))
+        for raw in reader:
+            rec = {}
+            for key, col in mapping.items():
+                v = (raw.get(col) or "").strip()
+                if v == "":
+                    continue
+                if key in ("odds", "prob", "stake", "pnl", "closing",
+                           "closing_fair", "clv", "bankroll_after"):
+                    try:
+                        rec[key] = float(v)
+                    except ValueError:
+                        continue
+                else:
+                    rec[key] = v
+            if "odds" in rec and "stake" in rec:
+                rows.append(rec)
+    return rows
+
+
+def analyse_log(rows, min_segment=15):
+    """
+    Audit d'un journal de paris : CLV, calibration, rendement, segments.
+
+    Implemente `/calib` et une partie de `/audit`. Le CLV est calcule a partir
+    de la cote de cloture DEVIGUEE quand elle est disponible ; sinon a partir
+    de la cote de cloture brute, ce qui le surestime — le rapport le signale.
+    """
+    n = len(rows)
+    settled = [r for r in rows if r.get("pnl") is not None]
+    staked = sum(r["stake"] for r in settled)
+    pnl = sum(r["pnl"] for r in settled)
+    returns = [r["pnl"] / r["stake"] for r in settled if r["stake"] > 0]
+
+    clvs, gross_only = [], 0
+    for r in rows:
+        if r.get("clv") is not None:
+            clvs.append(r["clv"])
+        elif r.get("closing_fair"):
+            clvs.append(r["odds"] / r["closing_fair"] - 1.0)
+        elif r.get("closing"):
+            clvs.append(r["odds"] / r["closing"] - 1.0)
+            gross_only += 1
+    beat = [r for r in rows if r.get("closing") and r["odds"] > r["closing"]]
+    n_close = len([r for r in rows if r.get("closing")])
+
+    pairs = [(r["prob"], 1 if (r.get("pnl") or 0) > 0 else 0)
+             for r in settled if r.get("prob") is not None]
+    calib = reliability_bins(pairs) if pairs else None
+
+    peak = dd = 0.0
+    path = [r["bankroll_after"] for r in rows if r.get("bankroll_after") is not None]
+    for b in path:
+        peak = max(peak, b)
+        if peak > 0:
+            dd = max(dd, (peak - b) / peak)
+
+    def segment(key):
+        buckets = defaultdict(list)
+        for r in rows:
+            if r.get(key):
+                buckets[r[key]].append(r)
+        out = []
+        for name, sub in sorted(buckets.items()):
+            if len(sub) < min_segment:
+                continue
+            sc = [x["clv"] if x.get("clv") is not None
+                  else (x["odds"] / x["closing_fair"] - 1.0)
+                  for x in sub if x.get("clv") is not None or x.get("closing_fair")]
+            ss = [x for x in sub if x.get("pnl") is not None]
+            out.append({
+                "name": name, "n": len(sub),
+                "clv_mean": (sum(sc) / len(sc)) if sc else None,
+                "roi": (sum(x["pnl"] for x in ss) / sum(x["stake"] for x in ss))
+                if ss and sum(x["stake"] for x in ss) > 0 else None,
+            })
+        return sorted(out, key=lambda x: -(x["clv_mean"] if x["clv_mean"] is not None else -9))
+
+    clv_mean = (sum(clvs) / len(clvs)) if clvs else None
+    report = {
+        "n_bets": n, "n_settled": len(settled), "n_with_closing": n_close,
+        "clv": {
+            "mean": clv_mean,
+            "ci95": bootstrap_ci(clvs) if len(clvs) > 5 else None,
+            "beat_close_rate": (len(beat) / n_close) if n_close else None,
+            "verdict": _band(clv_mean, CLV_BANDS),
+            "warning": ("%d paris sans cote de cloture deviguee : CLV surestime"
+                        % gross_only) if gross_only else None,
+        },
+        "calibration": ({"ece": calib["ece"], "n": calib["n"],
+                         "verdict": _band(calib["ece"], ECE_BANDS, ascending=True),
+                         "bins": [b for b in calib["bins"] if b["n"]]}
+                        if calib else None),
+        "returns": {
+            "staked": staked, "pnl": pnl,
+            "roi": (pnl / staked) if staked else None,
+            "significance": roi_significance(returns) if returns else None,
+            "ci95": bootstrap_ci(returns) if len(returns) > 5 else None,
+            "max_drawdown": dd if path else None,
+        },
+        "segments": {"competition": segment("competition"),
+                     "market": segment("market")},
+    }
+    stops = []
+    if clv_mean is not None and len(clvs) >= 150 and clv_mean < -0.005:
+        stops.append("CLV < -0,5 % sur plus de 150 paris -> arret et audit (08 §6)")
+    if calib and calib["n"] >= 300 and calib["ece"] > 0.07:
+        stops.append("ECE > 0,07 sur plus de 300 paris -> arret et recalibrage (08 §6)")
+    if dd > 0.35:
+        stops.append("drawdown > 35 %% (%.1f %%) -> arret et audit (07 §7)" % (100 * dd))
+    elif dd > 0.25:
+        stops.append("drawdown > 25 %% (%.1f %%) -> fraction de Kelly divisee par deux (07 §7)"
+                     % (100 * dd))
+    report["stop_criteria_triggered"] = stops
+    return report
+
+
+def render_log_report(rep):
+    """Rendu lisible de `analyse_log`."""
+    L = ["=" * 66,
+         "AUDIT DU JOURNAL — %d paris (%d denoues, %d avec cloture)"
+         % (rep["n_bets"], rep["n_settled"], rep["n_with_closing"]),
+         "=" * 66, "", "CLV  (indicateur n° 1)"]
+    c = rep["clv"]
+    if c["mean"] is None:
+        L.append("   aucune cote de cloture renseignee — indicateur indisponible")
+    else:
+        L.append("   moyen %+.2f %%   |   %s" % (100 * c["mean"], c["verdict"]))
+        if c["ci95"]:
+            L.append("   IC95 [%+.2f %% ; %+.2f %%]"
+                     % (100 * c["ci95"]["lo"], 100 * c["ci95"]["hi"]))
+        if c["beat_close_rate"] is not None:
+            L.append("   taux battu-cloture %.1f %%" % (100 * c["beat_close_rate"]))
+        if c["warning"]:
+            L.append("   ATTENTION : " + c["warning"])
+    cal = rep["calibration"]
+    L.append("")
+    L.append("CALIBRATION")
+    if not cal:
+        L.append("   probabilites non renseignees — indicateur indisponible")
+    else:
+        L.append("   ECE %.4f sur %d observations   |   %s"
+                 % (cal["ece"], cal["n"], cal["verdict"]))
+        for b in cal["bins"]:
+            L.append("   %.1f–%.1f : annonce %.1f %%  observe %.1f %%  (n=%d)  %+.1f pt"
+                     % (b["lo"], b["hi"], 100 * b["mean_pred"], 100 * b["observed"],
+                        b["n"], 100 * b["gap"]))
+    r = rep["returns"]
+    L.append("")
+    L.append("RENDEMENT  (le plus lent a devenir informatif)")
+    if r["roi"] is None:
+        L.append("   aucun pari denoue")
+    else:
+        L.append("   ROI %+.2f %%   mise totale %.2f   resultat %+.2f"
+                 % (100 * r["roi"], r["staked"], r["pnl"]))
+        sig = r["significance"]
+        if sig and sig["t"] is not None:
+            L.append("   t = %.2f   |   %s"
+                     % (sig["t"], "significatif a 95 %" if abs(sig["t"]) > 1.96
+                        else "NON significatif — ne rien conclure"))
+            if sig["n_required_95"]:
+                L.append("   paris necessaires pour conclure : %d" % sig["n_required_95"])
+        if r["max_drawdown"] is not None:
+            L.append("   drawdown maximal %.1f %%" % (100 * r["max_drawdown"]))
+    for key, title in (("competition", "PAR COMPETITION"), ("market", "PAR MARCHE")):
+        seg = rep["segments"][key]
+        if seg:
+            L.append("")
+            L.append(title)
+            for x in seg:
+                L.append("   %-22s n=%-5d CLV %s   ROI %s"
+                         % (x["name"][:22], x["n"],
+                            ("%+.2f %%" % (100 * x["clv_mean"])).rjust(8)
+                            if x["clv_mean"] is not None else "     n/d",
+                            ("%+.2f %%" % (100 * x["roi"])).rjust(8)
+                            if x["roi"] is not None else "     n/d"))
+    L.append("")
+    if rep["stop_criteria_triggered"]:
+        L.append("CRITERES D'ARRET DECLENCHES")
+        for stop in rep["stop_criteria_triggered"]:
+            L.append("   >>> " + stop)
+    else:
+        L.append("Aucun critere d'arret declenche.")
+    L.append("=" * 66)
+    return "\n".join(L)
+
+
+# --------------------------------------------------------------------------
 # 14. Backtest walk-forward
 # --------------------------------------------------------------------------
 
@@ -2541,6 +2781,35 @@ def selftest(verbose=True):
             s["rps"]["blend"] <= max(s["rps"]["model"], s["rps"]["market"]) + 1e-6)
     t.check("aucune fuite : ECE calcule", s["calibration"]["n"] > 0)
 
+    print("\n[14 bis] Journal de paris")
+    jrows = [{"odds": 2.10, "stake": 20.0, "prob": 0.52, "pnl": 22.0,
+              "closing_fair": 2.00, "closing": 1.95, "competition": "FRA2",
+              "market": "1X2", "bankroll_after": 1022.0}] * 20
+    jrows = [dict(r) for r in jrows]
+    jrows[0]["pnl"] = -20.0
+    rep = analyse_log(jrows, min_segment=5)
+    t.close("CLV moyen du journal", rep["clv"]["mean"], 0.05, 1e-9)
+    t.check("verdict CLV coherent avec le bareme de 08",
+            rep["clv"]["verdict"].startswith("avantage reel"))
+    t.check("taux battu-cloture = 100 %", rep["clv"]["beat_close_rate"] == 1.0)
+    t.close("ROI du journal",
+            rep["returns"]["roi"], (19 * 22.0 - 20.0) / 400.0, 1e-9)
+    t.check("segments produits", len(rep["segments"]["competition"]) == 1)
+    t.check("aucun critere d'arret sur un journal sain",
+            rep["stop_criteria_triggered"] == [])
+    bad = [dict(r, closing_fair=2.40, clv=None) for r in jrows]
+    for b in bad:
+        b.pop("clv", None)
+    rep_bad = analyse_log(bad, min_segment=5)
+    t.check("CLV negatif detecte", rep_bad["clv"]["mean"] < 0)
+    t.check("verdict d'arret quand le CLV est mauvais",
+            "arreter" in rep_bad["clv"]["verdict"])
+    t.check("rendu texte du journal",
+            "AUDIT DU JOURNAL" in render_log_report(rep))
+    t.check("CLV brut signale quand la cloture n'est pas deviguee",
+            analyse_log([{"odds": 2.1, "stake": 10.0, "closing": 2.0}])
+            ["clv"]["warning"] is not None)
+
     print("\n[15] Chargement CSV")
     tmp = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_selftest_tmp.csv")
     with open(tmp, "w", encoding="utf-8") as fh:
@@ -2684,6 +2953,14 @@ def _cmd_backtest(a):
                 w.writeheader()
                 w.writerows(bt["bets"])
         print("Journal des paris -> %s" % a.bets_out, file=sys.stderr)
+
+
+def _cmd_calib(a):
+    rows = load_bets_log(a.log)
+    rep = analyse_log(rows, min_segment=a.min_segment)
+    if a.out:
+        write_json(rep, a.out)
+    print(write_json(rep) if a.json else render_log_report(rep))
 
 
 def _cmd_season(a):
@@ -2844,6 +3121,13 @@ def build_parser():
     s.add_argument("--min-edge", type=float, default=0.03)
     s.add_argument("--out")
     s.set_defaults(func=_cmd_live)
+
+    s = sub.add_parser("calib", help="audit du journal de paris : CLV, calibration, ROI")
+    s.add_argument("--log", required=True, help="journal au format bets_log_template.csv")
+    s.add_argument("--min-segment", type=int, default=15)
+    s.add_argument("--json", action="store_true")
+    s.add_argument("--out")
+    s.set_defaults(func=_cmd_calib)
 
     s = sub.add_parser("season", help="simulation Monte-Carlo de fin de saison")
     s.add_argument("--model", required=True)

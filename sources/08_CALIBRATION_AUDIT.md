@@ -61,9 +61,26 @@ Un système calibré vérifie : parmi les paris annoncés à 60 %, environ 60 %
 passent. La calibration est **indépendante** de la rentabilité — on peut être
 parfaitement calibré et perdre (si on paie la marge), ou mal calibré et gagner.
 
+```bash
+python3 engine/footyedge.py calib --log data/journal.csv
+```
+
+Cette commande lit le journal et produit d'un coup : CLV (moyen, IC95, taux
+battu-clôture), courbe de fiabilité et ECE, ROI avec t-statistique et nombre
+de paris encore nécessaires pour conclure, drawdown maximal, segmentation par
+championnat et par marché, et **les critères d'arrêt du §6 automatiquement
+déclenchés**. C'est l'implémentation de `/calib` et du cœur de `/audit`.
+
+Elle signale aussi le cas où la cote de clôture n'est pas déviguée — le CLV
+est alors surestimé de la marge entière.
+
+En bibliothèque :
+
 ```python
-rb = fe.reliability_bins(pairs)     # pairs = [(proba, 0 ou 1), ...]
-print(rb["ece"])                    # Expected Calibration Error
+rows = fe.load_bets_log("data/journal.csv")
+rep = fe.analyse_log(rows)
+print(fe.render_log_report(rep))
+print(rep["clv"]["verdict"], rep["stop_criteria_triggered"])
 ```
 
 | ECE | Diagnostic |
@@ -171,10 +188,21 @@ commencer est la seule protection contre la rationalisation a posteriori.
    et datée.
 
 ```bash
+# 1. Le journal : CLV, calibration, rendement, segments, criteres d'arret
+python3 engine/footyedge.py calib --log data/journal.csv
+
+# 2. Le modele : validation temporelle et comparaison au marche
 python3 engine/footyedge.py backtest --csv data/history/ligue2.csv \
   --min-train 300 --refit 21 --w 0.5 --min-edge 0.04 \
   --out audit_l2.json --bets-out audit_l2_bets.csv
 ```
+
+**Segmenter est l'étape la plus instructive.** Un exemple réel de sortie :
+le segment au meilleur ROI (+23 %) était celui au plus mauvais CLV (−0,7 %),
+et les trois segments à CLV positif affichaient un ROI négatif. Sur quelques
+dizaines de paris, le ROI mesure surtout la chance ; le CLV mesure le
+processus. Piloter au ROI aurait conduit à renforcer le seul segment sans
+avantage et à abandonner les trois autres.
 
 ---
 

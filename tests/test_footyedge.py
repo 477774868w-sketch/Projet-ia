@@ -614,6 +614,95 @@ def test_csv_missing_columns_raises_a_clear_error():
         raise AssertionError("aucune erreur levee")
 
 
+# ------------------------------------------------------------- journal
+
+def _log_row(**kw):
+    base = {"odds": 2.10, "stake": 20.0, "prob": 0.52, "pnl": 22.0,
+            "closing_fair": 2.00, "closing": 1.98, "competition": "FRA2",
+            "market": "1X2", "bankroll_after": 1000.0}
+    base.update(kw)
+    return base
+
+
+def test_log_reads_the_shipped_template():
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "..", "data", "bets_log_template.csv")
+    rows = fe.load_bets_log(path)
+    assert len(rows) == 1
+    assert abs(rows[0]["odds"] - 1.80) < 1e-9
+    assert rows[0]["competition"] == "FRA2"
+    assert abs(rows[0]["clv"] - 0.0465) < 1e-9
+
+
+def test_log_requires_odds_and_stake():
+    with tempfile.TemporaryDirectory() as tmp:
+        p = os.path.join(tmp, "j.csv")
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write("date,competition\n2026-01-01,FRA2\n")
+        try:
+            fe.load_bets_log(p)
+        except ValueError as exc:
+            assert "colonnes manquantes" in str(exc)
+            return
+        raise AssertionError("aucune erreur levee")
+
+
+def test_analyse_log_computes_clv_from_the_fair_closing_price():
+    rep = fe.analyse_log([_log_row()] * 12, min_segment=5)
+    assert abs(rep["clv"]["mean"] - 0.05) < 1e-12          # 2.10 / 2.00 - 1
+    assert rep["clv"]["beat_close_rate"] == 1.0
+    assert rep["clv"]["warning"] is None
+
+
+def test_analyse_log_warns_when_closing_is_not_devigged():
+    rep = fe.analyse_log([{"odds": 2.10, "stake": 10.0, "closing": 2.00}])
+    assert rep["clv"]["warning"] is not None
+    assert abs(rep["clv"]["mean"] - 0.05) < 1e-12
+
+
+def test_analyse_log_verdicts_follow_the_documented_bands():
+    for fair, expected in ((1.95, "avantage reel"), (2.09, "aucun avantage"),
+                           (2.40, "mauvais cote")):
+        rows = [_log_row(closing_fair=fair) for _ in range(10)]
+        for r in rows:
+            r.pop("clv", None)
+        v = fe.analyse_log(rows)["clv"]["verdict"]
+        assert expected in v, (fair, v)
+
+
+def test_analyse_log_triggers_stop_criteria():
+    rows = [_log_row(closing_fair=2.40) for _ in range(160)]
+    rep = fe.analyse_log(rows)
+    assert any("CLV" in x for x in rep["stop_criteria_triggered"])
+    deep = [_log_row(bankroll_after=b) for b in (1000, 900, 800, 600, 550)]
+    assert any("drawdown" in x for x in fe.analyse_log(deep)["stop_criteria_triggered"])
+
+
+def test_analyse_log_separates_segments_and_honours_min_segment():
+    rows = ([_log_row(competition="FRA2") for _ in range(20)]
+            + [_log_row(competition="WENG1") for _ in range(3)])
+    rep = fe.analyse_log(rows, min_segment=10)
+    names = [x["name"] for x in rep["segments"]["competition"]]
+    assert names == ["FRA2"]                    # segment trop court ecarte
+
+
+def test_analyse_log_roi_and_significance():
+    rows = [_log_row(pnl=22.0) for _ in range(9)] + [_log_row(pnl=-20.0)]
+    rep = fe.analyse_log(rows)
+    assert abs(rep["returns"]["roi"] - (9 * 22.0 - 20.0) / 200.0) < 1e-12
+    assert rep["returns"]["significance"]["n_required_95"] is not None
+    assert rep["returns"]["ci95"]["lo"] <= rep["returns"]["ci95"]["hi"]
+
+
+def test_analyse_log_handles_an_unsettled_journal():
+    rows = [{"odds": 2.0, "stake": 10.0, "closing_fair": 1.95}]
+    rep = fe.analyse_log(rows)
+    assert rep["n_settled"] == 0
+    assert rep["returns"]["roi"] is None
+    assert rep["calibration"] is None
+    assert "AUDIT DU JOURNAL" in fe.render_log_report(rep)
+
+
 # ------------------------------------------------------------------ backtest
 
 def test_backtest_has_no_lookahead_and_beats_nothing_by_magic():

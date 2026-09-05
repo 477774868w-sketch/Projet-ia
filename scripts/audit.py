@@ -134,6 +134,9 @@ def audit_cli(a):
               "--away", syn["teams"][1], "--market-1x2", "2.30", "3.30", "3.20",
               "--offered", offered, "--brief"],
              lambda o: "Intensites" in o.replace("é", "e")),
+            ("calib", [PY, ENGINE, "calib", "--log",
+                       os.path.join(ROOT, "data", "bets_log_template.csv")],
+             lambda o: "AUDIT DU JOURNAL" in o and "CALIBRATION" in o),
             ("live", [PY, ENGINE, "live", "--lh", "1.6", "--la", "1.1",
                       "--minute", "63", "--score", "1", "0", "--red-away", "1"],
              lambda o: (json.loads(o)["live"]["minute"] == 63
@@ -263,6 +266,30 @@ def audit_live(a):
             "live_grid" in d09 and "ENCADRER un prix affiché" in d09)
 
 
+def audit_journal(a):
+    a.section("4 ter. Audit du journal de paris")
+    d08 = read("sources/08_CALIBRATION_AUDIT.md")
+    # Le signe est porte par la redaction du tableau (et le document utilise le
+    # signe moins typographique) : on ne compare que les valeurs absolues.
+    a.check("journal", "les bandes de CLV du code reprennent le bareme de 08",
+            all(("%.1f" % abs(100 * thr)).replace(".", ",") in d08
+                for thr, _ in fe.CLV_BANDS if thr != float("-inf")),
+            "bandes : %s" % [t for t, _ in fe.CLV_BANDS])
+    a.check("journal", "les bandes d'ECE du code reprennent le bareme de 08",
+            all(("%.2f" % thr).replace(".", ",") in d08
+                for thr, _ in fe.ECE_BANDS if thr != float("inf")))
+    rows = fe.load_bets_log(os.path.join(ROOT, "data", "bets_log_template.csv"))
+    a.check("journal", "le modele de journal livre est exploitable",
+            len(rows) == 1 and rows[0].get("clv") is not None)
+    good = [{"odds": 2.10, "stake": 10.0, "closing_fair": 1.95, "prob": 0.5,
+             "pnl": 11.0}] * 12
+    bad = [{"odds": 2.10, "stake": 10.0, "closing_fair": 2.40} for _ in range(160)]
+    a.check("journal", "CLV positif -> aucun critere d'arret",
+            fe.analyse_log(good)["stop_criteria_triggered"] == [])
+    a.check("journal", "CLV negatif sur 160 paris -> critere d'arret declenche",
+            any("CLV" in x for x in fe.analyse_log(bad)["stop_criteria_triggered"]))
+
+
 def audit_crossrefs(a):
     a.section("5. Renvois entre fichiers")
     src = os.path.join(ROOT, "sources")
@@ -309,7 +336,7 @@ def audit_documented_counts(a, quick, counts):
     audit_md, readme = read("AUDIT.md"), read("README.md")
     n_self = counts.get("selftest")
     n_tests = counts.get("tests")
-    n_audit = a.ok + len(a.fail) + 4     # + les 4 controles de cette section
+    n_audit = a.ok + len(a.fail) + 6     # + les 6 controles de cette section
     for label, value, texts in (("auto-test du moteur", n_self, (audit_md, readme)),
                                 ("suite independante", n_tests, (audit_md, readme))):
         a.check("counts", "%s : %s cite dans la documentation" % (label, value),
@@ -321,6 +348,18 @@ def audit_documented_counts(a, quick, counts):
             "AUDIT.md doit citer %d (=%s+%s+%s)" % (total, n_self, n_tests, n_audit))
     a.check("counts", "README.md annonce le bon total (%d)" % total,
             str(total) in readme)
+
+    # Les sous-sections de AUDIT.md doivent etre numerotees a la suite et leurs
+    # effectifs doivent redonner le total de cet audit.
+    heads = re.findall(r"### 2\.(\d+) [^(\n]+\((\d+) contr", audit_md)
+    nums = [int(h[0]) for h in heads]
+    a.check("counts", "sous-sections de AUDIT.md numerotees a la suite",
+            nums == list(range(1, len(nums) + 1)), "trouve : %s" % nums)
+    detailed = sum(int(h[1]) for h in heads[1:])   # hors 2.1 (auto-test moteur)
+    a.check("counts", "les effectifs des sous-sections redonnent %d" % n_audit,
+            detailed + 2 == n_audit,
+            "somme des sections = %d + 2 (integrite) = %d, attendu %d"
+            % (detailed, detailed + 2, n_audit))
 
 
 def audit_data(a):
@@ -466,6 +505,7 @@ def main():
     audit_tables(a)
     audit_claims(a)
     audit_live(a)
+    audit_journal(a)
     audit_crossrefs(a)
     audit_data(a)
     audit_end_to_end(a)

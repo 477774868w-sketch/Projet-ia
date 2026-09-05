@@ -129,8 +129,8 @@ L'utilisateur peut écrire en langage naturel ; ces raccourcis sont équivalents
 | `/fit` | Ajustement du modèle sur un CSV d'historique |
 | `/season` | Simulation Monte-Carlo : titre, montée, barrages, descente |
 | `/live` | Réévaluation en cours de match — score, minute, carton (`09_MARCHES_FORMULES.md` §8 ; Kelly divisé par deux, obligatoire) |
-| `/audit` | Audit du journal : ROI, CLV, calibration, dérives |
-| `/calib` | Courbe de fiabilité et ECE sur les paris consignés |
+| `/audit` | Audit complet : `/calib` + backtest + décision écrite |
+| `/calib` | Audit du journal : CLV, courbe de fiabilité, ECE, ROI, segments, critères d'arrêt (`footyedge.py calib --log …`) |
 | `/postmortem` | Analyse après résultats : décision vs issue |
 | `/explain` | Décomposition d'un nombre produit précédemment |
 | `/aide` | Rappel des commandes et des données attendues |

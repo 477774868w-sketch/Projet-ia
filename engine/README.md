@@ -33,7 +33,8 @@ python3 footyedge.py --help       # toutes les commandes
 | 11b | Rendu lisible | `render_match` |
 | 11c | Réévaluation en direct | `live_grid`, `remaining_share` |
 | 12 | Monte-Carlo | `simulate_season`, `simulate_parlay` |
-| 13 | Entrées/sorties CSV | `load_matches_csv` |
+| 13 | Entrées/sorties CSV | `load_matches_csv`, `load_bets_log` |
+| 13b | Audit du journal | `analyse_log`, `render_log_report` |
 | 14 | Backtest | `backtest` |
 | 15 | Données synthétiques | `synthetic_league`, `add_synthetic_odds` |
 | 16 | Auto-test | `selftest` |

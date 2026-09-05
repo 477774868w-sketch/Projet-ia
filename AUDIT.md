@@ -9,10 +9,10 @@ Rapport d'audit du dépôt FootyEdge 1.0.0.
 
 | Suite | Contrôles | Résultat |
 |---|---|---|
-| Auto-test du moteur (`footyedge.py selftest`) | 208 | **208 / 208** |
-| Suite de tests indépendante (`tests/test_footyedge.py`) | 60 | **60 / 60** |
-| Audit du système (`scripts/audit.py`) | 71 | **71 / 71** |
-| **Total** | **339** | **339 / 339** |
+| Auto-test du moteur (`footyedge.py selftest`) | 218 | **218 / 218** |
+| Suite de tests indépendante (`tests/test_footyedge.py`) | 69 | **69 / 69** |
+| Audit du système (`scripts/audit.py`) | 79 | **79 / 79** |
+| **Total** | **366** | **366 / 366** |
 
 Durée : moteur 7 s · tests 7 s · audit ≈ 60 s. Aucune dépendance externe.
 
@@ -20,7 +20,7 @@ Durée : moteur 7 s · tests 7 s · audit ≈ 60 s. Aucune dépendance externe.
 
 ## 2. Ce qui a été vérifié
 
-### 2.1 Intégrité mathématique du moteur (208 contrôles)
+### 2.1 Intégrité mathématique du moteur (218 contrôles)
 
 - La grille de scores est une distribution de probabilité pour toute
   combinaison d'intensités et de ρ, y compris aux valeurs extrêmes
@@ -46,12 +46,12 @@ Durée : moteur 7 s · tests 7 s · audit ≈ 60 s. Aucune dépendance externe.
   seules données antérieures, colonnes de cotes pré-match et de clôture
   strictement séparées.
 
-### 2.2 Commandes de la ligne de commande (12 contrôles)
+### 2.2 Commandes de la ligne de commande (13 contrôles)
 
-Les douze sous-commandes (`selftest`, `demo`, `devig`, `invert` en deux
-variantes, `price`, `fit`, `table`, `predict`, `live`, `season`, `backtest`)
-sont exécutées et leur sortie contrôlée sur le fond, pas seulement sur le
-code de retour.
+Les treize sous-commandes (`selftest`, `demo`, `devig`, `invert` en deux
+variantes, `price`, `fit`, `table`, `predict`, `calib`, `live`, `season`,
+`backtest`) sont exécutées et leur sortie contrôlée sur le fond, pas seulement
+sur le code de retour.
 
 ### 2.3 Conformité de la documentation au code (22 contrôles)
 
@@ -82,7 +82,14 @@ pré-match ; aucun score final inférieur au score déjà acquis ne reçoit de
 probabilité ; la distribution somme à 1 ; et la documentation porte bien la
 restriction d'usage.
 
-### 2.5 Cohérence du dépôt (17 contrôles)
+### 2.5 Audit du journal de paris (5 contrôles)
+
+Les seuils codés dans le moteur (bandes de CLV, bandes d'ECE) sont comparés au
+barème écrit dans `sources/08_CALIBRATION_AUDIT.md` : le code et la doctrine ne
+peuvent pas diverger. Le modèle de journal livré est effectivement lisible, et
+les critères d'arrêt se déclenchent bien sur un journal à CLV négatif.
+
+### 2.6 Cohérence du dépôt (19 contrôles)
 
 - Les 14 documents `sources/` sont présents ; aucun renvoi croisé ne pointe
   vers un fichier inexistant ; toutes les fonctions citées dans la
@@ -94,9 +101,11 @@ restriction d'usage.
 - Le modèle de journal sépare les champs de décision des champs de résultat.
 - Enfin, l'audit vérifie **ses propres chiffres** : les nombres de tests
   annoncés dans `AUDIT.md` et `README.md` sont comparés à ceux réellement
-  mesurés. Un compteur périmé dans la documentation est un échec d'audit.
+  mesurés, les sous-sections de ce rapport doivent être numérotées à la suite,
+  et leurs effectifs doivent redonner le total de l'audit. Un compteur périmé
+  dans la documentation est un échec d'audit.
 
-### 2.4 Chaîne complète (11 contrôles)
+### 2.7 Chaîne complète (13 contrôles)
 
 Ajustement sur 1 140 matchs → tarification d'un match à venir → détection de
 valeur → plan de mise sous plafonds → fiche lisible → backtest à fenêtre
@@ -244,9 +253,9 @@ Il ne garantit ni rendement, ni avantage sur un marché donné, ni accès durabl
 |---|---|
 | Moteur `engine/footyedge.py` | ≈ 2 700 lignes, 0 dépendance |
 | Base de connaissances `sources/` | 14 documents, ≈ 2 800 lignes |
-| Tests indépendants | 60 |
-| Contrôles internes du moteur | 208 |
-| Contrôles d'audit système | 71 |
+| Tests indépendants | 69 |
+| Contrôles internes du moteur | 218 |
+| Contrôles d'audit système | 79 |
 | Priors de compétitions | 55 |
 | Marchés tarifés depuis une seule grille | 16 familles |
 | Modes de tarification | pré-match et en direct |

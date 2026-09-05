@@ -8,7 +8,7 @@
 python3 engine/footyedge.py selftest
 ```
 
-Attendu : `Resultat : 208/208 tests reussis`. Aucune installation nécessaire :
+Attendu : `Resultat : 218/218 tests reussis`. Aucune installation nécessaire :
 le moteur n'utilise que la bibliothèque standard de Python 3.8+.
 
 ```bash
@@ -142,7 +142,7 @@ Détails et justifications : `sources/05_D2_ET_FEMININ.md`.
 | Jeudi | `/slate` sur la journée à venir |
 | J−0, H−1 | Réévaluer après compositions officielles, puis miser |
 | Après la journée | Compléter le journal (CLV, résultats) |
-| Toutes les 50 lignes | `/calib` |
+| Toutes les 50 lignes | `/calib` (`footyedge.py calib --log …`) |
 | Toutes les 200 lignes | `/audit` + décision écrite |
 
 ---
