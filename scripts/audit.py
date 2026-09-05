@@ -252,7 +252,7 @@ def audit_claims(a):
 
 
 def audit_live(a):
-    a.section("4 bis. Reevaluation en direct")
+    a.section("5. Reevaluation en direct")
     a.check("live", "part de buts restante > part de temps restante a chaque minute",
             all(fe.remaining_share(m) >= (90 - m) / 90.0 - 1e-12
                 for m in range(0, 91)))
@@ -273,7 +273,7 @@ def audit_live(a):
 
 
 def audit_journal(a):
-    a.section("4 ter. Audit du journal de paris")
+    a.section("6. Audit du journal de paris")
     d08 = read("sources/08_CALIBRATION_AUDIT.md")
     # Le signe est porte par la redaction du tableau (et le document utilise le
     # signe moins typographique) : on ne compare que les valeurs absolues.
@@ -297,7 +297,7 @@ def audit_journal(a):
 
 
 def audit_new_capabilities(a):
-    a.section("4 quater. Ajustement conjoint, incertitude, reglage, prix")
+    a.section("7. Ajustement conjoint, incertitude, reglage, prix")
 
     pyr = fe.synthetic_pyramid(n_per_div=12, seasons=3, seed=17)
     joint = fe.fit_dixon_coles(pyr["matches"], half_life_days=1e6, reg=0.7,
@@ -426,7 +426,7 @@ def _corr(x, y):
 
 
 def audit_crossrefs(a):
-    a.section("5. Renvois entre fichiers")
+    a.section("8. Renvois entre fichiers")
     src = os.path.join(ROOT, "sources")
     files = sorted(os.listdir(src))
     a.check("refs", "les 14 documents sources sont presents",
@@ -464,7 +464,7 @@ def audit_crossrefs(a):
 
 def audit_documented_counts(a, quick, counts):
     """Verifie que AUDIT.md et README.md annoncent les bons nombres de tests."""
-    a.section("6 bis. Chiffres annonces par la documentation")
+    a.section("11. Chiffres annonces par la documentation")
     if quick:
         a.note("chiffres annonces", "non verifiables sans les suites (--quick)")
         return
@@ -498,7 +498,7 @@ def audit_documented_counts(a, quick, counts):
 
 
 def audit_data(a):
-    a.section("6. Fichiers de donnees")
+    a.section("9. Fichiers de donnees")
     for f in ("fixtures_template.json", "standings_template.json",
               "offered_template.json"):
         try:
@@ -552,7 +552,7 @@ def audit_data(a):
 
 
 def audit_end_to_end(a):
-    a.section("7. Scenario complet")
+    a.section("10. Scenario complet")
     # Marche synthetique = verite + bruit. Le modele ne peut l'ameliorer que si
     # son erreur d'estimation est inferieure a ce bruit : d'ou 20 equipes,
     # 4 saisons (assez de donnees) et un bruit de marche de 0,16 (marche
