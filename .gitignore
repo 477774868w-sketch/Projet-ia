@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+*.egg-info/
+.venv/
+venv/
+model*.json
+*.local.json
+data/history/
+data/live/
+out/
