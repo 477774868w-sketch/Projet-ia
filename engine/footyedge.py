@@ -614,14 +614,22 @@ def _grid(T, s, rho, max_goals=MAX_GOALS):
     return ScoreGrid.from_lambdas(lam_h, lam_a, rho, max_goals)
 
 
-def _solve_s(T, target, fn, rho, max_goals):
+# Tolerance des inversions de marche. Elle porte sur une PROBABILITE :
+# 1e-7 represente 0,00001 point de pourcentage, trois ordres de grandeur
+# sous la precision de la moindre cote affichee. La resserrer davantage ne
+# fait que multiplier les constructions de grille (l'inversion est le poste
+# le plus couteux du backtest).
+INVERT_TOL = 1e-7
+
+
+def _solve_s(T, target, fn, rho, max_goals, tol=INVERT_TOL):
     """Trouve la suprematie s telle que fn(grille) = target (fn croissante)."""
     lo, hi = -T + 1e-3, T - 1e-3
 
     def f(s):
         return fn(_grid(T, s, rho, max_goals)) - target
 
-    r = bisect(f, lo, hi, tol=1e-9)
+    r = bisect(f, lo, hi, tol=tol)
     return lo if r is None else r
 
 
@@ -649,7 +657,7 @@ def lambdas_from_1x2(p_home, p_draw, p_away, rho=0.0, max_goals=MAX_GOALS):
         _, d, _ = _grid(T, s, rho, max_goals).result_probs()
         return d - p_draw
 
-    T = bisect(f_draw, 0.35, 9.0, tol=1e-8)
+    T = bisect(f_draw, 0.35, 9.0, tol=INVERT_TOL)
     if T is None:
         T = 2.6
     s = _solve_s(T, diff, f_diff, rho, max_goals)
@@ -678,7 +686,7 @@ def lambdas_from_asian(ah_line, p_ah_home, ou_line, p_over,
         s = _solve_s(T, p_ah_home, f_ah, rho, max_goals)
         return _grid(T, s, rho, max_goals).over_under(ou_line)["over"]["prob_norm"] - p_over
 
-    T = bisect(f_over, 0.35, 9.0, tol=1e-8)
+    T = bisect(f_over, 0.35, 9.0, tol=INVERT_TOL)
     if T is None:
         T = 2.6
     s = _solve_s(T, p_ah_home, f_ah, rho, max_goals)
