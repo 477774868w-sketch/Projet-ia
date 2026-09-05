@@ -151,7 +151,7 @@ sources/                      ← à déposer dans le Projet
   12_DONNEES_SOURCES.md       schémas CSV, qualité, cadence
   13_LEXIQUE.md               vocabulaire
 
-engine/footyedge.py           moteur, zéro dépendance, ~2 700 lignes
+engine/footyedge.py           moteur, zéro dépendance, ~3 150 lignes
 engine/README.md              organisation du moteur, conventions, performances
 tests/test_footyedge.py       69 tests indépendants
 data/                         priors de 55 compétitions + modèles de fichiers

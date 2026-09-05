@@ -251,12 +251,13 @@ Il ne garantit ni rendement, ni avantage sur un marché donné, ni accès durabl
 
 | Élément | Volume |
 |---|---|
-| Moteur `engine/footyedge.py` | ≈ 2 700 lignes, 0 dépendance |
-| Base de connaissances `sources/` | 14 documents, ≈ 2 800 lignes |
+| Moteur `engine/footyedge.py` | ≈ 3 150 lignes, 0 dépendance |
+| Base de connaissances `sources/` | 14 documents, ≈ 2 900 lignes |
 | Tests indépendants | 69 |
 | Contrôles internes du moteur | 218 |
 | Contrôles d'audit système | 79 |
 | Priors de compétitions | 55 |
+| Sous-commandes de la ligne de commande | 12 |
 | Marchés tarifés depuis une seule grille | 16 familles |
 | Modes de tarification | pré-match et en direct |
 | Méthodes de retrait de marge | 5 |
