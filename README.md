@@ -77,8 +77,8 @@ Voir **[DEMARRAGE_RAPIDE.md](DEMARRAGE_RAPIDE.md)** pour la version détaillée.
 ### 2. Vérifier le moteur
 
 ```bash
-python3 engine/footyedge.py selftest     # 193 contrôles d'intégrité
-python3 tests/test_footyedge.py          # 52 tests indépendants
+python3 engine/footyedge.py selftest     # 208 contrôles d'intégrité
+python3 tests/test_footyedge.py          # 60 tests indépendants
 python3 engine/footyedge.py demo         # démonstration guidée
 ```
 
@@ -118,6 +118,10 @@ python3 engine/footyedge.py predict --model model_l2.json \
 python3 engine/footyedge.py backtest --csv data/history/ligue2.csv \
     --min-train 300 --w 0.5 --out audit.json --bets-out paris.csv
 
+# Réévaluation en cours de match (63e minute, 1-0, rouge pour l'extérieur)
+python3 engine/footyedge.py live --lh 1.60 --la 1.10 --minute 63 \
+    --score 1 0 --red-away 1
+
 # Probabilités de montée, barrages, descente
 python3 engine/footyedge.py season --model model_l2.json \
     --fixtures data/fixtures_template.json --standings data/standings_template.json
@@ -146,11 +150,11 @@ sources/                      ← à déposer dans le Projet
 
 engine/footyedge.py           moteur, zéro dépendance, ~2 700 lignes
 engine/README.md              organisation du moteur, conventions, performances
-tests/test_footyedge.py       52 tests indépendants
+tests/test_footyedge.py       60 tests indépendants
 data/                         priors de 55 compétitions + modèles de fichiers
 scripts/generate_priors.py    régénère data/league_priors.csv
 scripts/generate_tables.py    régénère les tables chiffrées de sources/
-scripts/audit.py              audit complet du dépôt (64 contrôles)
+scripts/audit.py              audit complet du dépôt (71 contrôles)
 AUDIT.md                      rapport d'audit, limites, recommandations
 ```
 
@@ -160,7 +164,7 @@ AUDIT.md                      rapport d'audit, limites, recommandations
 python3 scripts/audit.py
 ```
 
-309 contrôles au total : intégrité mathématique du moteur, fonctionnement de
+339 contrôles au total : intégrité mathématique du moteur, fonctionnement de
 toutes les commandes, **conformité des tables de la documentation au code**,
 exactitude des affirmations chiffrées, renvois entre fichiers, validité des
 données, et un scénario complet de bout en bout.

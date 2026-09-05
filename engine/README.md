@@ -31,6 +31,7 @@ python3 footyedge.py --help       # toutes les commandes
 | 10 | Métriques | `rps`, `brier_multiclass`, `reliability_bins`, `clv` |
 | 11 | Tarification complète | `price_match`, `build_book`, `scan_value` |
 | 11b | Rendu lisible | `render_match` |
+| 11c | Réévaluation en direct | `live_grid`, `remaining_share` |
 | 12 | Monte-Carlo | `simulate_season`, `simulate_parlay` |
 | 13 | Entrées/sorties CSV | `load_matches_csv` |
 | 14 | Backtest | `backtest` |

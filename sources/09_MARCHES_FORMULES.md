@@ -192,7 +192,86 @@ miser.
 
 ---
 
-## 8. Encaissement anticipé et trading
+## 8. Réévaluation en cours de match (`/live`)
+
+Le moteur peut retarifer un match en cours. Le principe est simple : on
+tarifie **les buts qui restent à venir**, puis on décale la grille du score
+déjà acquis. Tous les marchés se dérivent ensuite normalement — ils portent
+bien sur le score final.
+
+```python
+g = fe.live_grid(lam_home=1.60, lam_away=1.10, minute=63,
+                 score_home=1, score_away=0, red_away=1, rho=-0.05)
+book = fe.build_book(g, with_halves=False)
+```
+
+```bash
+python3 engine/footyedge.py live --lh 1.60 --la 1.10 --minute 63 \
+    --score 1 0 --red-away 1 --offered cotes_live.json
+```
+
+### 8.1 Les trois corrections appliquées
+
+**1. Temps restant non linéaire.** On marque davantage en seconde période.
+Le taux étant croissant, **la part de buts restante dépasse la part de temps
+restante à chaque minute du match** — une règle de trois linéaire sous-estime
+donc systématiquement les buts encore à venir. L'écart culmine autour de la
+mi-temps.
+
+**2. Cartons rouges.** Coefficients 0,75 sur l'intensité de l'équipe réduite
+et 1,25 sur celle de l'adversaire, par carton, appliqués au temps restant.
+
+**3. Effet du score.** L'équipe menée pousse, l'équipe en tête se protège :
+−5 % par but d'avance sur son intensité offensive (plancher 0,85), +10 % par
+but de retard sur celle de l'adversaire (plafond 1,25).
+
+Match de référence : λ pré-match 1,60 − 1,10 (ρ = −0,05), score 1-0 pour le domicile.
+
+| Minute | Part des buts restante | Part du temps restante | P(1) | P(X) | P(2) | P(+2,5) |
+|---|---|---|---|---|---|---|
+| 0′ | 100.0 % | 100.0 % | 48.4% | 26.1% | 25.6% | 50.6% |
+| 15′ | 84.8 % | 83.3 % | 71.1% | 17.8% | 11.1% | 67.9% |
+| 30′ | 69.7 % | 66.7 % | 72.2% | 18.4% | 9.4% | 57.3% |
+| 45′ | 54.5 % | 50.0 % | 73.9% | 18.7% | 7.3% | 44.4% |
+| 60′ | 36.3 % | 33.3 % | 77.6% | 17.9% | 4.5% | 26.6% |
+| 75′ | 18.2 % | 16.7 % | 84.8% | 13.6% | 1.6% | 9.1% |
+| 85′ | 6.1 % | 5.6 % | 93.6% | 6.2% | 0.2% | 1.3% |
+
+Effet d'un carton rouge à la 30e minute, score 0-0 :
+
+| Situation | P(1) | P(X) | P(2) |
+|---|---|---|---|
+| aucun carton | 43.0% | 32.6% | 24.4% |
+| rouge domicile | 29.6% | 34.2% | 36.2% |
+| rouge extérieur | 56.5% | 28.7% | 14.8% |
+
+### 8.2 Limites — impératives
+
+Ce moteur est conçu pour le **pré-match**. Les trois corrections ci-dessus
+sont des **priors d'ordre de grandeur**, pas des coefficients estimés.
+
+En direct, le marché dispose d'informations que ce modèle n'a pas : le rythme
+réel de la rencontre, l'état physique des joueurs, les blessures en cours, les
+changements annoncés, l'intention tactique. Un modèle qui ne voit que
+(minute, score, cartons) est structurellement en retard sur un trader qui
+regarde le match.
+
+> **Règle du système : `/live` sert à ENCADRER un prix affiché, pas à le
+> remplacer.** Si le prix en direct s'écarte fortement du modèle, l'hypothèse
+> par défaut est que le modèle ignore quelque chose de visible à l'écran.
+> Kelly divisé par deux au minimum sur tout pari en direct, et jamais de pari
+> en direct sur un match que l'on ne regarde pas.
+
+Deux usages légitimes :
+
+1. **Détecter une réaction excessive** — un carton rouge à la 20e minute
+   provoque souvent un sur-ajustement du marché sur les totaux.
+2. **Tarifer un encaissement anticipé** (§9) : comparer le montant proposé à
+   `p_actuelle × gain_potentiel`.
+
+---
+
+## 9. Encaissement anticipé et trading
 
 L'encaissement proposé par un opérateur intègre systématiquement une marge
 supplémentaire, souvent 5 à 10 %. Il n'a d'intérêt que dans deux cas :

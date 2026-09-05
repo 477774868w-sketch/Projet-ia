@@ -8,7 +8,7 @@
 python3 engine/footyedge.py selftest
 ```
 
-Attendu : `Resultat : 193/193 tests reussis`. Aucune installation nécessaire :
+Attendu : `Resultat : 208/208 tests reussis`. Aucune installation nécessaire :
 le moteur n'utilise que la bibliothèque standard de Python 3.8+.
 
 ```bash

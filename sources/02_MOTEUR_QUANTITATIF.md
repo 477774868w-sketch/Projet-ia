@@ -64,7 +64,7 @@ de buts d'une équipe suit de fait une loi proche de Poisson.
 | Dépendance des scores bas | Nuls sous-évalués | Correction Dixon-Coles `ρ` |
 | Sur-dispersion | Cartons et 0-0 trop rares | Marginales binomiales négatives (`shape`) |
 | Intensité non constante | Plus de buts en fin de match | Décomposition en mi-temps (`h1_share ≈ 0,455`) |
-| Effet du score en cours | Une équipe menée attaque plus | Modèle *live* seulement — hors périmètre pré-match |
+| Effet du score en cours | Une équipe menée attaque plus | Réévaluation en direct (`live_grid`, voir `09_MARCHES_FORMULES.md` §8) |
 | Corrélation entre marchés | Combinés mal tarifés | Simulation Monte-Carlo sur la même grille |
 
 Sur-dispersion : utiliser `shape` (paramètre de forme de la binomiale

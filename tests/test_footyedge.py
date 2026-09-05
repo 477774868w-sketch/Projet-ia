@@ -450,6 +450,77 @@ def test_render_match_produces_text():
     assert len(txt.splitlines()) > 15
 
 
+# --------------------------------------------------------------------- live
+
+def test_remaining_share_endpoints_and_monotonicity():
+    assert abs(fe.remaining_share(0) - 1.0) < 1e-12
+    assert abs(fe.remaining_share(90) - 0.0) < 1e-12
+    assert abs(fe.remaining_share(45) - (1 - fe.DEFAULT_H1_SHARE)) < 1e-12
+    for m in range(0, 90):
+        assert fe.remaining_share(m) > fe.remaining_share(m + 1)
+
+
+def test_remaining_share_always_exceeds_linear_time():
+    """Le taux de buts etant croissant, il reste toujours plus de buts que de temps."""
+    for m in range(0, 91):
+        assert fe.remaining_share(m) >= (90 - m) / 90.0 - 1e-12, m
+
+
+def test_live_grid_reduces_to_prematch_at_kickoff():
+    pre = fe.ScoreGrid.from_lambdas(1.7, 1.15, -0.05)
+    live = fe.live_grid(1.7, 1.15, 0, 0, 0, rho=-0.05)
+    for i in range(9):
+        for j in range(9):
+            assert abs(pre.m[i][j] - live.m[i][j]) < 1e-12, (i, j)
+
+
+def test_live_grid_is_a_distribution_over_final_scores():
+    for minute, sh, sa in [(1, 0, 0), (30, 1, 0), (55, 1, 2), (89, 3, 3)]:
+        g = fe.live_grid(1.6, 1.1, minute, sh, sa, rho=-0.05)
+        assert abs(sum(sum(r) for r in g.m) - 1.0) < 1e-9, (minute, sh, sa)
+        # aucun score final inferieur au score deja acquis
+        for i in range(g.n + 1):
+            for j in range(g.n + 1):
+                if i < sh or j < sa:
+                    assert g.m[i][j] == 0.0, (minute, i, j)
+        td = g.total_dist()
+        assert min(k for k, p in td.items() if p > 1e-12) == sh + sa
+
+
+def test_live_win_probability_grows_as_the_clock_runs_down():
+    prev = 0.0
+    for minute in (10, 30, 50, 70, 85, 89):
+        p = fe.live_grid(1.6, 1.1, minute, 1, 0, rho=-0.05).result_probs()[0]
+        assert p > prev, minute
+        prev = p
+    assert prev > 0.90
+
+
+def test_live_red_cards_move_probabilities_the_right_way():
+    base = fe.live_grid(1.6, 1.1, 25, 0, 0, rho=-0.05).result_probs()
+    red_h = fe.live_grid(1.6, 1.1, 25, 0, 0, red_home=1, rho=-0.05).result_probs()
+    red_a = fe.live_grid(1.6, 1.1, 25, 0, 0, red_away=1, rho=-0.05).result_probs()
+    assert red_h[0] < base[0] and red_h[2] > base[2]
+    assert red_a[0] > base[0] and red_a[2] < base[2]
+    assert fe.live_grid(1.6, 1.1, 25, 0, 0, red_home=2,
+                        rho=-0.05).result_probs()[0] < red_h[0]
+
+
+def test_live_game_state_can_be_disabled():
+    on = fe.live_grid(1.6, 1.1, 40, 2, 0, rho=-0.05, game_state=True)
+    off = fe.live_grid(1.6, 1.1, 40, 2, 0, rho=-0.05, game_state=False)
+    assert on.lam_h < off.lam_h        # l'equipe en tete leve le pied
+    assert on.lam_a > off.lam_a        # l'equipe menee pousse
+
+
+def test_live_book_omits_halftime_markets_and_stays_coherent():
+    b = fe.build_book(fe.live_grid(1.6, 1.1, 70, 1, 1, rho=-0.05))
+    assert "halves" not in b and b["live"]["minute"] == 70
+    assert abs(sum(b["1x2"][k]["prob"] for k in ("home", "draw", "away")) - 1) < 1e-9
+    ah = b["asian_handicap"]["-0.50"]
+    assert abs(1 / ah["home"]["fair_odds"] + 1 / ah["away"]["fair_odds"] - 1) < 1e-9
+
+
 # ---------------------------------------------------------------- simulation
 
 def test_season_simulation_is_a_distribution():

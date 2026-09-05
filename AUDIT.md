@@ -9,18 +9,18 @@ Rapport d'audit du dépôt FootyEdge 1.0.0.
 
 | Suite | Contrôles | Résultat |
 |---|---|---|
-| Auto-test du moteur (`footyedge.py selftest`) | 193 | **193 / 193** |
-| Suite de tests indépendante (`tests/test_footyedge.py`) | 52 | **52 / 52** |
-| Audit du système (`scripts/audit.py`) | 64 | **64 / 64** |
-| **Total** | **309** | **309 / 309** |
+| Auto-test du moteur (`footyedge.py selftest`) | 208 | **208 / 208** |
+| Suite de tests indépendante (`tests/test_footyedge.py`) | 60 | **60 / 60** |
+| Audit du système (`scripts/audit.py`) | 71 | **71 / 71** |
+| **Total** | **339** | **339 / 339** |
 
-Durée : moteur 7 s · tests 7 s · audit 56 s. Aucune dépendance externe.
+Durée : moteur 7 s · tests 7 s · audit ≈ 60 s. Aucune dépendance externe.
 
 ---
 
 ## 2. Ce qui a été vérifié
 
-### 2.1 Intégrité mathématique du moteur (193 contrôles)
+### 2.1 Intégrité mathématique du moteur (208 contrôles)
 
 - La grille de scores est une distribution de probabilité pour toute
   combinaison d'intensités et de ρ, y compris aux valeurs extrêmes
@@ -46,7 +46,14 @@ Durée : moteur 7 s · tests 7 s · audit 56 s. Aucune dépendance externe.
   seules données antérieures, colonnes de cotes pré-match et de clôture
   strictement séparées.
 
-### 2.2 Conformité de la documentation au code (21 contrôles)
+### 2.2 Commandes de la ligne de commande (12 contrôles)
+
+Les douze sous-commandes (`selftest`, `demo`, `devig`, `invert` en deux
+variantes, `price`, `fit`, `table`, `predict`, `live`, `season`, `backtest`)
+sont exécutées et leur sortie contrôlée sur le fond, pas seulement sur le
+code de retour.
+
+### 2.3 Conformité de la documentation au code (22 contrôles)
 
 C'est le point le plus important de cet audit. **Toutes les tables chiffrées
 des documents sont produites par le moteur** (`scripts/generate_tables.py`) et
@@ -67,7 +74,15 @@ l'outsider passant de 34,5 à 25,0 sous sur-dispersion · sous-estimation de
 61 % du combiné « nul + moins de 2,5 buts » · écart de 2,6 points entre
 méthodes de devig sur un gros favori.
 
-### 2.3 Cohérence du dépôt (17 contrôles)
+### 2.4 Réévaluation en direct (5 contrôles)
+
+La part de buts restante dépasse la part de temps restante à chaque minute ;
+au coup d'envoi sur 0-0 la grille en direct redonne exactement la grille
+pré-match ; aucun score final inférieur au score déjà acquis ne reçoit de
+probabilité ; la distribution somme à 1 ; et la documentation porte bien la
+restriction d'usage.
+
+### 2.5 Cohérence du dépôt (17 contrôles)
 
 - Les 14 documents `sources/` sont présents ; aucun renvoi croisé ne pointe
   vers un fichier inexistant ; toutes les fonctions citées dans la
@@ -171,11 +186,16 @@ La part de buts en première mi-temps (0,455) est également un prior.
 
 ### 4.4 Périmètre du modèle
 
-Ne sont **pas** couverts : le jeu en direct (le modèle est strictement
-pré-match), les cartons et corners (lois différentes, modèle dédié
-nécessaire), les buteurs (méthode approchée seulement,
-`sources/09` §6), l'effet du score en cours sur l'intensité, la collecte
-automatique de données.
+Ne sont **pas** couverts : les cartons et corners (lois différentes, modèle
+dédié nécessaire), les buteurs (méthode approchée seulement, `sources/09` §6),
+la collecte automatique de données.
+
+Le **jeu en direct** (`live_grid`, `sources/09` §8) est couvert, mais de façon
+délibérément sommaire : temps restant non linéaire, cartons rouges et effet du
+score sont des priors d'ordre de grandeur, pas des coefficients estimés. Le
+modèle ne voit que (minute, score, cartons) là où un trader voit le match.
+Cette fonction sert à **encadrer** un prix affiché, jamais à le remplacer, et
+la documentation impose Kelly divisé par deux sur tout pari en direct.
 
 La correction Dixon-Coles traite la dépendance des scores bas ; elle ne traite
 ni les cartons rouges, ni les effets de style de jeu spécifiques à une
@@ -224,11 +244,12 @@ Il ne garantit ni rendement, ni avantage sur un marché donné, ni accès durabl
 |---|---|
 | Moteur `engine/footyedge.py` | ≈ 2 700 lignes, 0 dépendance |
 | Base de connaissances `sources/` | 14 documents, ≈ 2 800 lignes |
-| Tests indépendants | 52 |
-| Contrôles internes du moteur | 193 |
-| Contrôles d'audit système | 64 |
+| Tests indépendants | 60 |
+| Contrôles internes du moteur | 208 |
+| Contrôles d'audit système | 71 |
 | Priors de compétitions | 55 |
 | Marchés tarifés depuis une seule grille | 16 familles |
+| Modes de tarification | pré-match et en direct |
 | Méthodes de retrait de marge | 5 |
 
 ---

@@ -134,6 +134,12 @@ def audit_cli(a):
               "--away", syn["teams"][1], "--market-1x2", "2.30", "3.30", "3.20",
               "--offered", offered, "--brief"],
              lambda o: "Intensites" in o.replace("é", "e")),
+            ("live", [PY, ENGINE, "live", "--lh", "1.6", "--la", "1.1",
+                      "--minute", "63", "--score", "1", "0", "--red-away", "1"],
+             lambda o: (json.loads(o)["live"]["minute"] == 63
+                        and abs(sum(json.loads(o)["book"]["1x2"][k]["prob"]
+                                    for k in ("home", "draw", "away")) - 1) < 1e-9
+                        and "halves" not in json.loads(o)["book"])),
             ("season", [PY, ENGINE, "season", "--model", model,
                         "--fixtures", fixtures, "--sims", "300"],
              lambda o: abs(sum(t["p_champion"] for t in json.loads(o)["teams"]) - 1) < 1e-6),
@@ -234,6 +240,27 @@ def audit_claims(a):
     a.check("claims", "03 §2 : écart de 2,6 points entre méthodes sur un gros favori",
             abs(spread - 2.63) < 0.1 and "2,6 points" in d03,
             "moteur %.2f points" % spread)
+
+
+def audit_live(a):
+    a.section("4 bis. Reevaluation en direct")
+    a.check("live", "part de buts restante > part de temps restante a chaque minute",
+            all(fe.remaining_share(m) >= (90 - m) / 90.0 - 1e-12
+                for m in range(0, 91)))
+    pre = fe.ScoreGrid.from_lambdas(1.7, 1.15, -0.05)
+    lg = fe.live_grid(1.7, 1.15, 0, 0, 0, rho=-0.05)
+    a.check("live", "coup d'envoi 0-0 : identique a la grille pre-match",
+            all(abs(pre.m[i][j] - lg.m[i][j]) < 1e-12
+                for i in range(9) for j in range(9)))
+    g = fe.live_grid(1.6, 1.1, 55, 2, 1, rho=-0.05)
+    a.check("live", "aucun score final inferieur au score acquis",
+            all(g.m[i][j] == 0.0 for i in range(g.n + 1) for j in range(g.n + 1)
+                if i < 2 or j < 1))
+    a.check("live", "grille live : somme des probabilites = 1",
+            abs(sum(sum(r) for r in g.m) - 1.0) < 1e-9)
+    d09 = read("sources/09_MARCHES_FORMULES.md")
+    a.check("live", "09 §8 documente bien la reevaluation en direct",
+            "live_grid" in d09 and "ENCADRER un prix affiché" in d09)
 
 
 def audit_crossrefs(a):
@@ -438,6 +465,7 @@ def main():
     audit_cli(a)
     audit_tables(a)
     audit_claims(a)
+    audit_live(a)
     audit_crossrefs(a)
     audit_data(a)
     audit_end_to_end(a)

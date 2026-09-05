@@ -1393,8 +1393,10 @@ def build_book(grid, ou_lines=DEFAULT_OU_LINES, ah_lines=DEFAULT_AH_LINES,
     for side in ("home", "away"):
         book["team_totals"][side] = {"%.2f" % ln: grid.team_total(side, ln)
                                      for ln in team_total_lines}
-    if with_halves and grid.lam_h:
+    if with_halves and grid.lam_h and not grid.meta.get("live"):
         book["halves"] = halves_analysis(grid.lam_h, grid.lam_a, grid.rho, h1_share)
+    if grid.meta.get("live"):
+        book["live"] = dict(grid.meta)
     return book
 
 
@@ -1687,6 +1689,92 @@ def render_match(res, home="Domicile", away="Exterieur", competition="",
                      % (100 * sp["total_exposure"], 100 * sp["expected_growth"]))
     L.append("=" * 66)
     return "\n".join(L)
+
+
+# --------------------------------------------------------------------------
+# 11 ter. Reevaluation en cours de match
+# --------------------------------------------------------------------------
+
+def remaining_share(minute, h1_share=DEFAULT_H1_SHARE, total_minutes=90.0):
+    """
+    Part des buts attendus qu'il reste a jouer a la minute `minute`.
+
+    L'intensite n'est PAS uniforme : on marque davantage en seconde periode.
+    Consequence, verifiee a chaque minute par l'auto-test : la regle de trois
+    lineaire (temps restant / 90) SOUS-ESTIME les buts encore a venir a tout
+    moment du match. Le taux etant croissant, la part de buts restante est
+    toujours superieure a la part de temps restante.
+
+    Exemple : a la 20e minute il reste 78 % du temps mais 80 % des buts ;
+    a la 70e, 22 % du temps mais 24 % des buts.
+    """
+    half = total_minutes / 2.0
+    m = _clip(float(minute), 0.0, total_minutes)
+    if m <= half:
+        return h1_share * (half - m) / half + (1.0 - h1_share)
+    return (1.0 - h1_share) * (total_minutes - m) / half
+
+
+def live_grid(lam_home, lam_away, minute, score_home=0, score_away=0,
+              red_home=0, red_away=0, rho=0.0, h1_share=DEFAULT_H1_SHARE,
+              game_state=True, max_goals=MAX_GOALS, total_minutes=90.0):
+    """
+    Distribution du score FINAL a partir de la situation courante.
+
+    On tarife les buts restants, puis on decale la grille du score deja
+    acquis. Tous les marches se derivent ensuite normalement : 1X2, totaux,
+    handicaps s'entendent bien sur le score final.
+
+    Trois corrections sont appliquees a l'intensite restante :
+
+    1. **Temps restant non lineaire** — voir `remaining_share`.
+    2. **Cartons rouges** — une equipe reduite marque moins et encaisse plus.
+       Coefficients 0,75 et 1,25 par carton : ce sont des PRIORS d'ordre de
+       grandeur, a recalibrer sur vos donnees.
+    3. **Effet du score** — l'equipe menee pousse, l'equipe en tete se
+       protege. Egalement des priors, volontairement modestes et plafonnes.
+
+    Ces trois corrections sont des approximations assumees : ce moteur est
+    concu pour le pre-match. En direct, le marche dispose d'informations
+    (rythme reel, blessures, intentions) que ce modele n'a pas. Utiliser
+    cette fonction pour ENCADRER un prix affiche, pas pour le remplacer.
+    """
+    share = remaining_share(minute, h1_share, total_minutes)
+    lh = max(float(lam_home), 1e-6) * share
+    la = max(float(lam_away), 1e-6) * share
+
+    for _ in range(int(red_home)):
+        lh *= 0.75
+        la *= 1.25
+    for _ in range(int(red_away)):
+        la *= 0.75
+        lh *= 1.25
+
+    if game_state:
+        lead = int(score_home) - int(score_away)
+        if lead > 0:
+            lh *= max(1.0 - 0.05 * lead, 0.85)
+            la *= min(1.0 + 0.10 * lead, 1.25)
+        elif lead < 0:
+            k = -lead
+            la *= max(1.0 - 0.05 * k, 0.85)
+            lh *= min(1.0 + 0.10 * k, 1.25)
+
+    rem = ScoreGrid.from_lambdas(lh, la, rho, max_goals)
+    sh, sa = int(score_home), int(score_away)
+    n = max_goals + max(sh, sa)
+    matrix = [[0.0] * (n + 1) for _ in range(n + 1)]
+    for i in range(max_goals + 1):
+        row = rem.m[i]
+        for j in range(max_goals + 1):
+            if row[j]:
+                matrix[i + sh][j + sa] += row[j]
+    g = ScoreGrid(matrix, lh, la, rho,
+                  meta={"live": True, "minute": minute,
+                        "score": "%d-%d" % (sh, sa),
+                        "remaining_share": share,
+                        "red_home": int(red_home), "red_away": int(red_away)})
+    return g
 
 
 # --------------------------------------------------------------------------
@@ -2383,6 +2471,44 @@ def selftest(verbose=True):
     t.check("penalite reduit la mise",
             res_far["stake_plan"]["kelly_fraction"] < 0.25)
 
+    print("\n[11 bis] Reevaluation en direct")
+    t.close("part restante a la 0e minute", remaining_share(0), 1.0, 1e-12)
+    t.close("part restante a la mi-temps", remaining_share(45), 1 - DEFAULT_H1_SHARE, 1e-12)
+    t.close("part restante au coup de sifflet final", remaining_share(90), 0.0, 1e-12)
+    t.check("part restante decroissante",
+            all(remaining_share(m) > remaining_share(m + 5) for m in range(0, 85, 5)))
+    t.check("part de buts restante > part de temps restante, a chaque minute",
+            all(remaining_share(m) >= (90 - m) / 90.0 - 1e-12
+                for m in range(0, 91)))
+    t.check("ecart maximal a la regle lineaire autour de la pause",
+            max(range(0, 91), key=lambda m: remaining_share(m) - (90 - m) / 90.0)
+            in range(40, 51))
+    lg0 = live_grid(1.6, 1.1, 0, 0, 0, rho=-0.05)
+    g0 = ScoreGrid.from_lambdas(1.6, 1.1, -0.05)
+    t.close("minute 0, score vierge = grille pre-match",
+            lg0.result_probs()[0], g0.result_probs()[0], 1e-12)
+    lg90 = live_grid(1.6, 1.1, 90, 2, 1, rho=-0.05)
+    # 2e-6 de residu : l'intensite est bornee a 1e-6 par cote pour eviter une
+    # grille degeneree. C'est un plancher numerique assume, pas une erreur.
+    t.close("minute 90 : masse ponctuelle sur le score acquis",
+            lg90.correct_score(2, 1), 1.0, 1e-5)
+    lg = live_grid(1.6, 1.1, 60, 1, 0, rho=-0.05)
+    t.close("grille live somme=1", sum(sum(r) for r in lg.m), 1.0, 1e-9)
+    t.check("mener a la 60e augmente la probabilite de gagner",
+            lg.result_probs()[0] > g0.result_probs()[0])
+    t.check("total minimal = score deja acquis",
+            min(k for k, p in lg.total_dist().items() if p > 1e-12) == 1)
+    t.check("carton rouge : penalise l'equipe reduite",
+            live_grid(1.6, 1.1, 30, 0, 0, red_home=1).result_probs()[0]
+            < live_grid(1.6, 1.1, 30, 0, 0).result_probs()[0])
+    t.check("carton rouge adverse : profite a l'autre equipe",
+            live_grid(1.6, 1.1, 30, 0, 0, red_away=1).result_probs()[0]
+            > live_grid(1.6, 1.1, 30, 0, 0).result_probs()[0])
+    bl = build_book(lg)
+    t.check("livre live sans analyse mi-temps", "halves" not in bl and "live" in bl)
+    t.close("livre live : 1X2 somme=1",
+            sum(bl["1x2"][k]["prob"] for k in ("home", "draw", "away")), 1.0, 1e-9)
+
     print("\n[12] Simulation de saison")
     fixtures = [{"home": a, "away": b} for a in syn["teams"][:6]
                 for b in syn["teams"][:6] if a != b]
@@ -2570,6 +2696,17 @@ def _cmd_season(a):
     print(write_json(sim, a.out))
 
 
+def _cmd_live(a):
+    grid = live_grid(a.lh, a.la, a.minute, a.score[0], a.score[1],
+                     red_home=a.red_home, red_away=a.red_away, rho=a.rho)
+    book = build_book(grid, with_halves=False)
+    out = {"engine": __version__, "live": dict(grid.meta), "book": book}
+    if a.offered:
+        out["value_bets"] = scan_value(grid, _load_json_arg(a.offered),
+                                       min_edge=a.min_edge, devig_spread=0.02)
+    print(write_json(out, a.out))
+
+
 def _cmd_demo(a):
     print("--- Demonstration FootyEdge ---\n")
     print("1) Un book affiche 1X2 = 2.10 / 3.40 / 3.60. Que vaut vraiment le match ?")
@@ -2693,6 +2830,20 @@ def build_parser():
     s.add_argument("--bets-out")
     s.add_argument("--verbose", action="store_true")
     s.set_defaults(func=_cmd_backtest)
+
+    s = sub.add_parser("live", help="reevaluation en cours de match")
+    s.add_argument("--lh", type=float, required=True, help="lambda domicile PRE-MATCH")
+    s.add_argument("--la", type=float, required=True, help="lambda exterieur PRE-MATCH")
+    s.add_argument("--minute", type=float, required=True)
+    s.add_argument("--score", type=int, nargs=2, default=[0, 0],
+                   metavar=("DOM", "EXT"))
+    s.add_argument("--red-home", type=int, default=0)
+    s.add_argument("--red-away", type=int, default=0)
+    s.add_argument("--rho", type=float, default=-0.04)
+    s.add_argument("--offered")
+    s.add_argument("--min-edge", type=float, default=0.03)
+    s.add_argument("--out")
+    s.set_defaults(func=_cmd_live)
 
     s = sub.add_parser("season", help="simulation Monte-Carlo de fin de saison")
     s.add_argument("--model", required=True)

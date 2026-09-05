@@ -128,7 +128,7 @@ L'utilisateur peut écrire en langage naturel ; ces raccourcis sont équivalents
 | `/invert` | Cotes → intensités de buts → tarif de tous les marchés dérivés |
 | `/fit` | Ajustement du modèle sur un CSV d'historique |
 | `/season` | Simulation Monte-Carlo : titre, montée, barrages, descente |
-| `/live` | Réévaluation en cours de match (score, temps, carton) |
+| `/live` | Réévaluation en cours de match — score, minute, carton (`09_MARCHES_FORMULES.md` §8 ; Kelly divisé par deux, obligatoire) |
 | `/audit` | Audit du journal : ROI, CLV, calibration, dérives |
 | `/calib` | Courbe de fiabilité et ECE sur les paris consignés |
 | `/postmortem` | Analyse après résultats : décision vs issue |

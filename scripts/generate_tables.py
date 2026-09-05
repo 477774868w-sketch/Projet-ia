@@ -220,6 +220,32 @@ def table_kelly():
     return "\n".join(out)
 
 
+def table_live():
+    out = ["Match de référence : λ pré-match 1,60 − 1,10 (ρ = −0,05), score 1-0 "
+           "pour le domicile.", "",
+           "| Minute | Part des buts restante | Part du temps restante | P(1) | P(X) | P(2) | P(+2,5) |",
+           "|---|---|---|---|---|---|---|"]
+    for m in (0, 15, 30, 45, 60, 75, 85):
+        share = fe.remaining_share(m)
+        g = fe.live_grid(1.60, 1.10, m, 1 if m else 0, 0, rho=-0.05)
+        h, d, a = g.result_probs()
+        out.append("| %d′ | %.1f %% | %.1f %% | %.1f%% | %.1f%% | %.1f%% | %.1f%% |"
+                   % (m, 100 * share, 100 * (90 - m) / 90.0, 100 * h, 100 * d,
+                      100 * a, 100 * g.over_under(2.5)["over"]["win"]))
+    out.append("")
+    out.append("Effet d'un carton rouge à la 30e minute, score 0-0 :")
+    out.append("")
+    out.append("| Situation | P(1) | P(X) | P(2) |")
+    out.append("|---|---|---|---|")
+    for lab, rh, ra in (("aucun carton", 0, 0), ("rouge domicile", 1, 0),
+                        ("rouge extérieur", 0, 1)):
+        h, d, a = fe.live_grid(1.60, 1.10, 30, 0, 0, red_home=rh,
+                               red_away=ra, rho=-0.05).result_probs()
+        out.append("| %s | %.1f%% | %.1f%% | %.1f%% |"
+                   % (lab, 100 * h, 100 * d, 100 * a))
+    return "\n".join(out)
+
+
 TABLES = {
     "A": (table_A, "sources/02_MOTEUR_QUANTITATIF.md"),
     "B": (table_B, "sources/02_MOTEUR_QUANTITATIF.md"),
@@ -229,6 +255,7 @@ TABLES = {
     "kelly": (table_kelly, "sources/07_STAKING_RISQUE.md"),
     "dispersion": (table_dispersion, "sources/05_D2_ET_FEMININ.md"),
     "parlay": (table_parlay, "sources/09_MARCHES_FORMULES.md"),
+    "live": (table_live, "sources/09_MARCHES_FORMULES.md"),
 }
 
 
