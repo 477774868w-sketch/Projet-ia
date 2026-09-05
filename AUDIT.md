@@ -9,18 +9,19 @@ Rapport d'audit du dépôt FootyEdge 1.0.0.
 
 | Suite | Contrôles | Résultat |
 |---|---|---|
-| Auto-test du moteur (`footyedge.py selftest`) | 218 | **218 / 218** |
-| Suite de tests indépendante (`tests/test_footyedge.py`) | 69 | **69 / 69** |
-| Audit du système (`scripts/audit.py`) | 79 | **79 / 79** |
-| **Total** | **366** | **366 / 366** |
+| Auto-test du moteur (`footyedge.py selftest`) | 246 | **246 / 246** |
+| Suite de tests indépendante (`tests/test_footyedge.py`) | 95 | **95 / 95** |
+| Audit du système (`scripts/audit.py`) | 107 | **107 / 107** |
+| **Total** | **448** | **448 / 448** |
 
-Durée : moteur 7 s · tests 7 s · audit ≈ 60 s. Aucune dépendance externe.
+Durée : moteur ≈ 30 s · tests ≈ 60 s · audit ≈ 5 min. Aucune dépendance
+externe : bibliothèque standard de Python uniquement.
 
 ---
 
 ## 2. Ce qui a été vérifié
 
-### 2.1 Intégrité mathématique du moteur (218 contrôles)
+### 2.1 Intégrité mathématique du moteur (246 contrôles)
 
 - La grille de scores est une distribution de probabilité pour toute
   combinaison d'intensités et de ρ, y compris aux valeurs extrêmes
@@ -46,14 +47,14 @@ Durée : moteur 7 s · tests 7 s · audit ≈ 60 s. Aucune dépendance externe.
   seules données antérieures, colonnes de cotes pré-match et de clôture
   strictement séparées.
 
-### 2.2 Commandes de la ligne de commande (13 contrôles)
+### 2.2 Commandes de la ligne de commande (14 contrôles)
 
-Les treize sous-commandes (`selftest`, `demo`, `devig`, `invert` en deux
-variantes, `price`, `fit`, `table`, `predict`, `calib`, `live`, `season`,
-`backtest`) sont exécutées et leur sortie contrôlée sur le fond, pas seulement
-sur le code de retour.
+Les quatorze sous-commandes (`selftest`, `demo`, `devig`, `invert` en deux
+variantes, `price`, `fit`, `table`, `predict`, `tune`, `calib`, `live`,
+`season`, `backtest`) sont exécutées et leur sortie contrôlée sur le fond, pas
+seulement sur le code de retour.
 
-### 2.3 Conformité de la documentation au code (22 contrôles)
+### 2.3 Conformité de la documentation au code (25 contrôles)
 
 C'est le point le plus important de cet audit. **Toutes les tables chiffrées
 des documents sont produites par le moteur** (`scripts/generate_tables.py`) et
@@ -61,11 +62,12 @@ l'audit les régénère puis vérifie qu'elles figurent telles quelles dans les
 fichiers `sources/`. Une divergence entre le code et la documentation devient
 donc une erreur détectable, pas un écart silencieux.
 
-Sont ainsi vérifiées : la table de conversion (total, suprématie) → 1X2, la
-table des totaux, la table BTTS, la table des lignes de handicap équitables,
-la comparaison des cinq méthodes de retrait de marge, l'effet de la
-sur-dispersion sur les grands écarts, les profils de drawdown par fraction de
-Kelly, et les effets de corrélation sur les combinés.
+Douze tables sont ainsi vérifiées : conversion (total, suprématie) → 1X2,
+totaux, BTTS, lignes de handicap équitables, comparaison des cinq méthodes de
+retrait de marge, effet de la sur-dispersion sur les grands écarts, profils de
+drawdown par fraction de Kelly, corrélations dans les combinés, réévaluation
+en direct, ajustement conjoint contre ajustements séparés, décroissance de
+l'incertitude d'estimation, et cas témoins de recalibration.
 
 Les affirmations numériques du texte sont vérifiées séparément :
 marge de 4,59 % et intensités 1,41 − 1,00 du guide de démarrage · formules
@@ -89,7 +91,30 @@ barème écrit dans `sources/08_CALIBRATION_AUDIT.md` : le code et la doctrine n
 peuvent pas diverger. Le modèle de journal livré est effectivement lisible, et
 les critères d'arrêt se déclenchent bien sur un journal à CLV négatif.
 
-### 2.6 Cohérence du dépôt (19 contrôles)
+### 2.6 Ajustement conjoint, incertitude, réglage, prix (23 contrôles)
+
+Les six capacités ajoutées après le premier audit sont contrôlées sur le fond,
+pas seulement sur leur exécution :
+
+- **Multi-championnats** : les notes restent comparables d'une division à
+  l'autre (corrélation > 0,85 sur pyramide synthétique) ; le décalage de
+  niveau de buts a le bon signe ; changer de division ne modifie **pas** la
+  force relative de deux équipes ; et un seul championnat redonne exactement
+  le modèle simple.
+- **Incertitude d'estimation** : σ dans une plage plausible, décroissante avec
+  les données, exactement proportionnelle à (1 − w) après fusion, et `None`
+  — jamais une fausse certitude — sur un modèle rechargé depuis un JSON.
+- **Recalibration** : la sur-confiance est détectée, la log-perte s'améliore,
+  un modèle déjà calibré est laissé tranquille, un échantillon insuffisant
+  renvoie l'identité, et la documentation porte bien l'arbitrage.
+- **Comparaison des opérateurs** : meilleure cote et opérateur retenus,
+  consensus obtenu par mise en commun de probabilités déviguées.
+- **Seuil de bascule** : le déplacement calculé annule effectivement
+  l'avantage (vérifié numériquement) et va dans le bon sens.
+- **Réglage automatique** : `w = 1` redonne le RPS du marché à 0,002 près,
+  la grille est triée, et le réglage refuse de fonctionner sans cotes.
+
+### 2.7 Cohérence du dépôt (19 contrôles)
 
 - Les 14 documents `sources/` sont présents ; aucun renvoi croisé ne pointe
   vers un fichier inexistant ; toutes les fonctions citées dans la
@@ -105,7 +130,7 @@ les critères d'arrêt se déclenchent bien sur un journal à CLV négatif.
   et leurs effectifs doivent redonner le total de l'audit. Un compteur périmé
   dans la documentation est un échec d'audit.
 
-### 2.7 Chaîne complète (13 contrôles)
+### 2.8 Chaîne complète (14 contrôles)
 
 Ajustement sur 1 140 matchs → tarification d'un match à venir → détection de
 valeur → plan de mise sous plafonds → fiche lisible → backtest à fenêtre
@@ -118,7 +143,7 @@ tarifés) : RPS modèle 0,2085 · marché 0,2074 · **fusion 0,2059** · ECE 0,0
 
 ## 3. Défauts trouvés et corrigés pendant la construction
 
-L'audit a mis au jour deux défauts réels, tous deux dans le moteur.
+L'audit a mis au jour **trois** défauts réels, tous dans le moteur.
 
 **1. Handicap asiatique — mauvais seuil côté extérieur.** Le camp extérieur
 était évalué au seuil `line` au lieu de `−line`. Sur une ligne −0,5, le prix
@@ -134,13 +159,35 @@ sous-optimale. Détecté par un test d'optimalité numérique, pas par un test d
 valeur attendue — un test qui aurait simplement comparé à une valeur codée en
 dur n'aurait rien vu. Corrigé par le traitement explicite du cas exhaustif.
 
-Trois défauts ont par ailleurs été trouvés **dans les tests eux-mêmes** :
+**3. Incertitude du modèle non réduite par la fusion avec le marché.** Après
+fusion, `log λ = (1−w)·log λ_modèle + w·log λ_marché` : seule la fraction
+(1−w) porte l'incertitude d'estimation. Le moteur appliquait la variance
+entière, ce qui gonflait σ d'un facteur 1/(1−w) — à `w = 0,55`, presque le
+double — et faisait rejeter des paris valables par le critère `z`. Détecté
+par le contrôle de bout en bout de cet audit, qui a cessé de détecter un prix
+généreux après le passage à la σ de Fisher. Corrigé : à `w = 1` (marché pur)
+l'incertitude du modèle disparaît, ce qui est exact.
+
+Cinq défauts ont par ailleurs été trouvés **dans les tests eux-mêmes** :
 une hypothèse fausse sur le Kelly exclusif (il mise davantage au total, pas
-moins, car les issues se couvrent mutuellement), un point frontière réalisable
-(Σf = 1) exclu à tort, et une confusion entre `overround` et `margin_pct` dans
-le script d'audit. Ils sont documentés ici parce qu'ils illustrent le principal
-risque de ce genre de système : **un test qui encode une intuition fausse est
-plus dangereux qu'une absence de test.**
+moins, car les issues se couvrent mutuellement) ; un point frontière réalisable
+(Σf = 1) exclu à tort ; une confusion entre `overround` et `margin_pct` ; une
+règle de trois linéaire supposée à tort sur-estimer les buts restants, alors
+qu'elle les sous-estime à chaque minute ; et l'hypothèse que le rapport des
+intensités serait conservé d'une division à l'autre, alors que l'avantage du
+terrain propre au championnat le modifie exactement d'un facteur
+exp(δ_A − δ_B).
+
+Un **faux positif** mérite aussi d'être consigné : une première validation de
+la méthode delta contre un bootstrap donnait un écart de 89 %, ce qui laissait
+craindre une erreur grave. Le bootstrap était faux — il échantillonnait un
+sous-bloc de la matrice de covariance en ignorant les corrélations croisées
+qui se compensent. Refait sur la loi complète, l'accord est de ±1,1 %.
+
+Ils sont documentés ici parce qu'ils illustrent le principal risque de ce genre
+de système : **un test qui encode une intuition fausse est plus dangereux
+qu'une absence de test**, et un contrôle qui échoue doit être suspecté avant le
+code qu'il contrôle.
 
 ---
 
@@ -210,7 +257,48 @@ La correction Dixon-Coles traite la dépendance des scores bas ; elle ne traite
 ni les cartons rouges, ni les effets de style de jeu spécifiques à une
 confrontation.
 
-### 4.5 Performance
+### 4.5 La recalibration n'est pas gratuite
+
+Sur cas témoins, la recalibration fait exactement ce qu'on lui demande :
+température 1,175 sur un modèle sur-confiant, 0,976 sur un modèle déjà
+calibré, 0,923 sur un modèle sous-confiant, avec un ECE ramené à ~0 dans les
+trois cas.
+
+Mais appliquée à un modèle **déjà proche de la calibration**, elle améliore
+l'ECE tout en dégradant légèrement la finesse : sur nos données synthétiques,
+ECE 0,025 → 0,014 mais log-perte **dégradée** de 0,003 et RPS de 0,0004.
+Aplatir les probabilités réduit la perte des cas mal classés et augmente celle
+des cas bien classés.
+
+Elle est donc **désactivée par défaut**. Ne l'activer que si l'ECE dépasse
+0,04, et ne la conserver que si la log-perte hors échantillon s'améliore
+aussi. Le backtest donne les deux chiffres ; la décision est mesurée, pas
+dogmatique.
+
+### 4.6 Le réglage automatique ne crée pas d'avantage
+
+`tune` trouve la meilleure configuration **parmi celles qu'on lui propose**,
+sur les données qu'on lui donne. Trois précautions :
+
+- Une grille trop fine sur un historique court revient à sur-ajuster les
+  hyperparamètres : préférer 3 à 4 valeurs par axe.
+- Le RPS retenu est optimiste du fait même de la sélection. Pour une
+  estimation honnête du gain, réserver une saison entière jamais utilisée
+  pendant le réglage.
+- Si le minimum est atteint en `w_marché = 1`, la conclusion n'est pas qu'il
+  faut régler autrement : c'est que le modèle n'apporte rien sur ce
+  championnat.
+
+### 4.7 Ce que l'ajustement conjoint suppose
+
+Les notes ne deviennent comparables entre divisions que s'il existe un
+**chemin** entre elles dans les données : équipes qui montent ou descendent,
+matchs de coupe. Sur deux championnats de pays différents sans aucune
+rencontre commune, les échelles restent arbitraires — le modèle ne le signale
+pas par une erreur, seulement par un `θ` mal déterminé. Vérifiez qu'un pont
+existe avant de comparer deux championnats.
+
+### 4.8 Performance
 
 Python pur, un seul cœur. Le poste dominant est l'inversion du marché
 (≈ 28 ms par match), pas l'ajustement du modèle. Un backtest de
@@ -218,7 +306,7 @@ Python pur, un seul cœur. Le poste dominant est l'inversion du marché
 quotidien ; à revoir pour un balayage systématique de dizaines de
 championnats.
 
-### 4.6 Ce que le système ne peut pas garantir
+### 4.9 Ce que le système ne peut pas garantir
 
 Il ne garantit ni rendement, ni avantage sur un marché donné, ni accès durable
 à des limites de mise exploitables. Sa fonction la plus utile est de dire
@@ -228,12 +316,14 @@ Il ne garantit ni rendement, ni avantage sur un marché donné, ni accès durabl
 
 ## 5. Recommandations, par ordre de priorité
 
-1. **Charger deux à cinq saisons réelles** du championnat visé et lancer
-   `backtest`. Lire `rps_edge_vs_market` avant tout le reste.
+1. **Charger deux à cinq saisons réelles**, toutes divisions d'un même pays
+   dans le même fichier (colonne `Div` ou `league`), puis lancer `tune`. Lire
+   le verdict et `rps_edge_vs_market` avant tout le reste.
 2. **Recalibrer les priors** du championnat à partir de la sortie de `fit`
    (`mu`, `home_adv`, `rho`) et mettre à jour `league_priors.csv`.
-3. **Choisir la demi-vie par backtest**, pas à l'intuition : tester
-   90 / 120 / 180 / 270 et retenir le minimum du RPS hors échantillon.
+3. **Laisser `tune` choisir** demi-vie, rétrécissement et poids du marché,
+   puis vérifier la forme de la courbe : un minimum intérieur confirme que le
+   modèle apporte de l'information.
 4. **Tenir le journal dès le premier pari.** Sans journal, aucun audit — donc
    aucun système.
 5. **Commencer en simulation** sur 100 à 200 paris, et ne passer en réel que
@@ -251,14 +341,15 @@ Il ne garantit ni rendement, ni avantage sur un marché donné, ni accès durabl
 
 | Élément | Volume |
 |---|---|
-| Moteur `engine/footyedge.py` | ≈ 3 150 lignes, 0 dépendance |
-| Base de connaissances `sources/` | 14 documents, ≈ 2 900 lignes |
-| Tests indépendants | 69 |
-| Contrôles internes du moteur | 218 |
-| Contrôles d'audit système | 79 |
+| Moteur `engine/footyedge.py` | ≈ 4 000 lignes, 0 dépendance |
+| Base de connaissances `sources/` | 14 documents, ≈ 3 200 lignes |
+| Tests indépendants | 95 |
+| Contrôles internes du moteur | 246 |
+| Contrôles d'audit système | 107 |
 | Priors de compétitions | 55 |
-| Sous-commandes de la ligne de commande | 12 |
+| Sous-commandes de la ligne de commande | 14 |
 | Marchés tarifés depuis une seule grille | 16 familles |
+| Tables de la documentation produites par le moteur | 12 |
 | Modes de tarification | pré-match et en direct |
 | Méthodes de retrait de marge | 5 |
 

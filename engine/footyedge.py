@@ -787,12 +787,50 @@ def _parse_date(value):
             continue
     raise ValueError("date illisible: %r" % value)
 
+def _solve_inverse(mat):
+    """Inverse d'une matrice symetrique definie positive (Gauss-Jordan)."""
+    n = len(mat)
+    a = [row[:] + [1.0 if i == j else 0.0 for j in range(n)]
+         for i, row in enumerate(mat)]
+    for col in range(n):
+        piv = max(range(col, n), key=lambda r: abs(a[r][col]))
+        if abs(a[piv][col]) < 1e-14:
+            raise ValueError("matrice singuliere en colonne %d" % col)
+        a[col], a[piv] = a[piv], a[col]
+        d = a[col][col]
+        row = a[col]
+        for k in range(col, 2 * n):
+            row[k] /= d
+        for r in range(n):
+            if r == col:
+                continue
+            f = a[r][col]
+            if f == 0.0:
+                continue
+            ar = a[r]
+            for k in range(col, 2 * n):
+                ar[k] -= f * row[k]
+    return [r[n:] for r in a]
+
 
 class DixonColesModel:
-    """Forces offensives / defensives par equipe + avantage du terrain."""
+    """
+    Forces offensives / defensives par equipe, avantage du terrain, et
+    decalages de niveau par championnat.
+
+    Les notes `att` et `def` sont GLOBALES : deux equipes de divisions
+    differentes sont directement comparables des lors qu'un chemin les relie
+    dans les donnees (promotions, relegations, matchs de coupe). C'est ce qui
+    permet de tarifer un promu ou un match inter-divisions sans repartir de
+    zero.
+
+    `theta` capture le niveau de buts propre a chaque championnat, `delta`
+    l'ecart d'avantage du terrain de ce championnat a la moyenne.
+    """
 
     def __init__(self, teams, att, dfn, home_adv, mu, rho,
-                 counts=None, weights=None, meta=None):
+                 counts=None, weights=None, meta=None, leagues=None,
+                 theta=None, delta=None, team_league=None, fisher=None):
         self.teams = list(teams)
         self.att = dict(att)
         self.dfn = dict(dfn)
@@ -802,36 +840,120 @@ class DixonColesModel:
         self.counts = counts or {}
         self.weights = weights or {}
         self.meta = meta or {}
+        self.leagues = list(leagues or [])
+        self.theta = dict(theta or {})
+        self.delta = dict(delta or {})
+        self.team_league = dict(team_league or {})
+        self._fisher = fisher            # {"matrix", "index"} ou None
+        self._cov = None
 
     # ------------------------------------------------------------------ API
     def known(self, team):
         return team in self.att
 
-    def lambdas(self, home, away, neutral=False, adj_home=1.0, adj_away=1.0):
-        ah = self.att.get(home, 0.0)
-        dh = self.dfn.get(home, 0.0)
-        aa = self.att.get(away, 0.0)
-        da = self.dfn.get(away, 0.0)
-        hfa = 0.0 if neutral else self.home_adv
-        lam_h = math.exp(self.mu + hfa + ah + da) * adj_home
-        lam_a = math.exp(self.mu + aa + dh) * adj_away
+    def league_of(self, team):
+        """Championnat le plus recent ou l'equipe a ete vue."""
+        return self.team_league.get(team)
+
+    def lambdas(self, home, away, neutral=False, adj_home=1.0, adj_away=1.0,
+                league=None):
+        """
+        Intensites attendues. `league` force le contexte de championnat ;
+        par defaut on prend celui de l'equipe a domicile (utile pour une coupe
+        ou pour projeter une equipe dans une autre division).
+        """
+        lg = league if league is not None else self.league_of(home)
+        th = self.theta.get(lg, 0.0)
+        dl = self.delta.get(lg, 0.0)
+        hfa = 0.0 if neutral else (self.home_adv + dl)
+        lam_h = math.exp(self.mu + th + hfa + self.att.get(home, 0.0)
+                         + self.dfn.get(away, 0.0)) * adj_home
+        lam_a = math.exp(self.mu + th + self.att.get(away, 0.0)
+                         + self.dfn.get(home, 0.0)) * adj_away
         return lam_h, lam_a
 
     def grid(self, home, away, neutral=False, adj_home=1.0, adj_away=1.0,
-             max_goals=MAX_GOALS, shape=None):
-        lh, la = self.lambdas(home, away, neutral, adj_home, adj_away)
+             max_goals=MAX_GOALS, shape=None, league=None):
+        lh, la = self.lambdas(home, away, neutral, adj_home, adj_away, league)
         return ScoreGrid.from_lambdas(lh, la, self.rho, max_goals, shape, shape)
 
     def reliability(self, team):
         """Poids effectif accumule : proxy de la confiance dans la note."""
         return self.weights.get(team, 0.0)
 
-    def table(self):
+    # ------------------------------------------------- incertitude des notes
+    def covariance(self):
+        """
+        Matrice de covariance des parametres, par inversion de l'information
+        de Fisher observee.
+
+        Pour une vraisemblance de Poisson ponderee,
+            J = somme_m  w_m * lambda_m * x_m x_m^T   +  penalisation
+        ou x_m est le vecteur d'appartenance de l'observation m. J^-1 donne
+        directement l'incertitude d'estimation des notes — sans bootstrap,
+        sans simulation.
+
+        Une crete de regularisation minime est ajoutee sur mu, l'avantage du
+        terrain et les decalages de championnat : ces directions ne sont
+        identifiees que par les contraintes de centrage, et J y serait
+        singuliere sans elle. Les contrastes reellement identifies n'en sont
+        pas affectes de facon sensible.
+        """
+        if self._cov is not None:
+            return self._cov
+        if not self._fisher:
+            return None
+        mat = [row[:] for row in self._fisher["matrix"]]
+        self._cov = _solve_inverse(mat)
+        return self._cov
+
+    def _design(self, home, away, neutral=False, league=None):
+        """Vecteurs creux (indice, valeur) des deux observations d'un match."""
+        f = self._fisher
+        if not f:
+            return None, None
+        ix = f["index"]
+        lg = league if league is not None else self.league_of(home)
+        xh = [(ix["mu"], 1.0)]
+        xa = [(ix["mu"], 1.0)]
+        if ("theta", lg) in ix:
+            xh.append((ix[("theta", lg)], 1.0))
+            xa.append((ix[("theta", lg)], 1.0))
+        if not neutral:
+            xh.append((ix["hfa"], 1.0))
+            if ("delta", lg) in ix:
+                xh.append((ix[("delta", lg)], 1.0))
+        for key, vec in ((("att", home), xh), (("def", away), xh),
+                         (("att", away), xa), (("def", home), xa)):
+            if key in ix:
+                vec.append((ix[key], 1.0))
+        return xh, xa
+
+    def lambda_uncertainty(self, home, away, neutral=False, league=None):
+        """
+        (var(log lambda_dom), var(log lambda_ext), covariance).
+
+        Renvoie None si l'information de Fisher n'a pas ete conservee
+        (modele recharge depuis un fichier, par exemple).
+        """
+        cov = self.covariance()
+        xh, xa = self._design(home, away, neutral, league)
+        if cov is None or xh is None:
+            return None
+
+        def quad(u, v):
+            return sum(cu * cv * cov[i][j] for i, cu in u for j, cv in v)
+
+        return quad(xh, xh), quad(xa, xa), quad(xh, xa)
+
+    # ---------------------------------------------------------------- table
+    def table(self, league=None):
         rows = []
         for t in self.teams:
-            lh, la = self.lambdas(t, t)     # match fictif contre soi-meme
+            if league is not None and self.league_of(t) != league:
+                continue
             rows.append({
-                "team": t,
+                "team": t, "league": self.league_of(t),
                 "attack": self.att.get(t, 0.0),
                 "defense": self.dfn.get(t, 0.0),
                 "rating": self.att.get(t, 0.0) - self.dfn.get(t, 0.0),
@@ -845,42 +967,79 @@ class DixonColesModel:
             r["rank"] = i
         return rows
 
+    def league_table(self):
+        """Niveau relatif des championnats, en buts et en note moyenne."""
+        rows = []
+        for lg in self.leagues:
+            members = [t for t in self.teams if self.league_of(t) == lg]
+            if not members:
+                continue
+            mean_rating = sum(self.att[t] - self.dfn[t] for t in members) / len(members)
+            rows.append({
+                "league": lg, "n_teams": len(members),
+                "goal_level": round(math.exp(self.mu + self.theta.get(lg, 0.0)) * 2, 3),
+                "theta": round(self.theta.get(lg, 0.0), 4),
+                "home_adv": round(self.home_adv + self.delta.get(lg, 0.0), 4),
+                "mean_team_rating": round(mean_rating, 4),
+            })
+        rows.sort(key=lambda r: -r["mean_team_rating"])
+        return rows
+
     def to_dict(self):
         return {
             "type": "dixon_coles", "version": __version__,
             "teams": self.teams, "att": self.att, "def": self.dfn,
             "home_adv": self.home_adv, "mu": self.mu, "rho": self.rho,
             "counts": self.counts, "weights": self.weights, "meta": self.meta,
+            "leagues": self.leagues, "theta": self.theta, "delta": self.delta,
+            "team_league": self.team_league,
         }
 
     @staticmethod
     def from_dict(d):
-        return DixonColesModel(d["teams"], d["att"], d["def"], d["home_adv"],
-                               d["mu"], d["rho"], d.get("counts"),
-                               d.get("weights"), d.get("meta"))
+        return DixonColesModel(
+            d["teams"], d["att"], d["def"], d["home_adv"], d["mu"], d["rho"],
+            d.get("counts"), d.get("weights"), d.get("meta"), d.get("leagues"),
+            d.get("theta"), d.get("delta"), d.get("team_league"))
 
 
 def fit_dixon_coles(matches, half_life_days=180.0, reg=1.0, ref_date=None,
                     max_iter=600, lr=0.06, fit_rho=True, target="goals",
-                    xg_weight=0.6, init_model=None, verbose=False):
+                    xg_weight=0.6, init_model=None, reg_hfa=4.0,
+                    with_uncertainty=True, verbose=False):
     """
     Ajuste le modele par maximum de vraisemblance pondere.
 
-    matches   : liste de dicts {date, home, away, hg, ag [, hxg, axg]}
+    matches   : [{date, home, away, hg, ag [, league, hxg, axg, neutral]}]
     half_life : demi-vie de la ponderation temporelle, en jours.
                 Court (90 j) = reactif mais bruite ; long (365 j) = stable
                 mais lent a integrer les changements d'effectif.
-    reg       : force de retrecissement vers la moyenne du championnat.
-                Indispensable pour les promus et les petits echantillons.
+    reg       : retrecissement des notes vers la moyenne. Indispensable pour
+                les promus et les petits echantillons.
+    reg_hfa   : retrecissement de l'avantage du terrain propre a chaque
+                championnat vers la moyenne generale. Eleve par defaut : cet
+                ecart est reel mais lentement estime.
     target    : "goals" | "xg" | "blend"  (si colonnes hxg/axg fournies)
+
+    **Ajustement conjoint multi-championnats.** Si les matchs portent un champ
+    `league`, un decalage de niveau de buts est estime par championnat et les
+    notes d'equipes restent GLOBALES. Consequence directe : une equipe promue
+    conserve son historique de division inferieure, et un match de coupe entre
+    divisions se tarifie sans hypothese ad hoc. L'identification vient des
+    equipes qui changent de division au fil du temps et des matchs
+    inter-divisions.
+
+    Avec un seul championnat, le modele se reduit exactement au cas simple.
 
     init_model : modele precedent servant de point de depart (demarrage a
                  chaud). Divise par ~4 le nombre d'iterations necessaires
                  lors d'un backtest walk-forward.
+    with_uncertainty : conserve l'information de Fisher observee, qui donne
+                 l'incertitude d'estimation des notes (voir `covariance`).
 
-    Gradient analytique : d/d att_i = sum_m w_m (y_m - lambda_m).
-    Rho (correction Dixon-Coles) est ajuste dans un second temps par
-    section doree sur la vraisemblance des scores bas.
+    Gradient analytique : d/d att_i = somme_m w_m (y_m - lambda_m).
+    Rho est ajuste dans un second temps par section doree sur la
+    vraisemblance des seuls scores bas.
     """
     data = []
     for m in matches:
@@ -889,8 +1048,7 @@ def fit_dixon_coles(matches, half_life_days=180.0, reg=1.0, ref_date=None,
             hg, ag = float(m["hg"]), float(m["ag"])
         except (KeyError, TypeError, ValueError):
             continue
-        hxg = m.get("hxg")
-        axg = m.get("axg")
+        hxg, axg = m.get("hxg"), m.get("axg")
         yh, ya = hg, ag
         if target in ("xg", "blend") and hxg not in (None, "") and axg not in (None, ""):
             hxg, axg = float(hxg), float(axg)
@@ -899,9 +1057,11 @@ def fit_dixon_coles(matches, half_life_days=180.0, reg=1.0, ref_date=None,
             else:
                 yh = xg_weight * hxg + (1 - xg_weight) * hg
                 ya = xg_weight * axg + (1 - xg_weight) * ag
+        lg = m.get("league")
         data.append({"date": d, "home": str(m["home"]).strip(),
                      "away": str(m["away"]).strip(), "yh": yh, "ya": ya,
                      "hg": hg, "ag": ag,
+                     "league": str(lg).strip() if lg not in (None, "") else "_",
                      "neutral": bool(m.get("neutral", False))})
     if not data:
         raise ValueError("aucun match exploitable")
@@ -919,94 +1079,155 @@ def fit_dixon_coles(matches, half_life_days=180.0, reg=1.0, ref_date=None,
     teams = sorted({d["home"] for d in data} | {d["away"] for d in data})
     idx = {t: i for i, t in enumerate(teams)}
     n = len(teams)
+    leagues = sorted({d["league"] for d in data})
+    lidx = {lg: i for i, lg in enumerate(leagues)}
+    L = len(leagues)
 
-    counts = defaultdict(int)
-    wsum = defaultdict(float)
+    counts, wsum = defaultdict(int), defaultdict(float)
+    last_seen, team_league = {}, {}
     for d in data:
-        counts[d["home"]] += 1
-        counts[d["away"]] += 1
-        wsum[d["home"]] += d["w"]
-        wsum[d["away"]] += d["w"]
+        for t in (d["home"], d["away"]):
+            counts[t] += 1
+            wsum[t] += d["w"]
+            if d["date"] and (t not in last_seen or d["date"] >= last_seen[t]):
+                last_seen[t] = d["date"]
+                team_league[t] = d["league"]
+
+    # Disposition du vecteur de parametres : [mu, hfa, theta(L), delta(L),
+    # att(n), def(n)]
+    P_MU, P_HFA = 0, 1
+    P_TH, P_DL = 2, 2 + L
+    P_AT, P_DF = 2 + 2 * L, 2 + 2 * L + n
+    size = 2 + 2 * L + 2 * n
 
     total_w = sum(d["w"] for d in data)
     mean_goals = sum(d["w"] * (d["yh"] + d["ya"]) for d in data) / (2 * total_w)
-    params = [safe_log(max(mean_goals, 0.05)), 0.15] + [0.0] * (2 * n)
+    params = [0.0] * size
+    params[P_MU] = safe_log(max(mean_goals, 0.05))
+    params[P_HFA] = 0.15
     if init_model is not None:
-        params[0] = init_model.mu
-        params[1] = init_model.home_adv
+        params[P_MU] = init_model.mu
+        params[P_HFA] = init_model.home_adv
+        for lg, i in lidx.items():
+            params[P_TH + i] = init_model.theta.get(lg, 0.0)
+            params[P_DL + i] = init_model.delta.get(lg, 0.0)
         for t, i in idx.items():
-            params[2 + i] = init_model.att.get(t, 0.0)
-            params[2 + n + i] = init_model.dfn.get(t, 0.0)
-    opt = Adam(len(params), lr=lr)
+            params[P_AT + i] = init_model.att.get(t, 0.0)
+            params[P_DF + i] = init_model.dfn.get(t, 0.0)
 
+    opt = Adam(size, lr=lr)
     for it in range(max_iter):
-        g = [0.0] * len(params)
+        g = [0.0] * size
         for d in data:
             w = d["w"]
-            i, j = idx[d["home"]], idx[d["away"]]
-            hfa = 0.0 if d["neutral"] else params[1]
-            lh = math.exp(params[0] + hfa + params[2 + i] + params[2 + n + j])
-            la = math.exp(params[0] + params[2 + j] + params[2 + n + i])
-            lh = min(lh, 25.0)
-            la = min(la, 25.0)
+            i, j, l = idx[d["home"]], idx[d["away"]], lidx[d["league"]]
+            hfa = 0.0 if d["neutral"] else (params[P_HFA] + params[P_DL + l])
+            base = params[P_MU] + params[P_TH + l]
+            lh = min(math.exp(base + hfa + params[P_AT + i] + params[P_DF + j]), 25.0)
+            la = min(math.exp(base + params[P_AT + j] + params[P_DF + i]), 25.0)
             rh = w * (d["yh"] - lh)
             ra = w * (d["ya"] - la)
-            g[0] += rh + ra
+            g[P_MU] += rh + ra
+            g[P_TH + l] += rh + ra
             if not d["neutral"]:
-                g[1] += rh
-            g[2 + i] += rh                 # attaque domicile
-            g[2 + n + j] += rh             # faiblesse defensive exterieur
-            g[2 + j] += ra                 # attaque exterieur
-            g[2 + n + i] += ra             # faiblesse defensive domicile
-        for k in range(n):                 # retrecissement L2 vers 0
-            g[2 + k] -= reg * params[2 + k]
-            g[2 + n + k] -= reg * params[2 + n + k]
-        params = opt.step(params, g)
-        # identifiabilite : attaque et defense de moyenne nulle
-        ma = sum(params[2:2 + n]) / n
-        md = sum(params[2 + n:2 + 2 * n]) / n
+                g[P_HFA] += rh
+                g[P_DL + l] += rh
+            g[P_AT + i] += rh          # attaque domicile
+            g[P_DF + j] += rh          # faiblesse defensive exterieur
+            g[P_AT + j] += ra          # attaque exterieur
+            g[P_DF + i] += ra          # faiblesse defensive domicile
         for k in range(n):
-            params[2 + k] -= ma
-            params[2 + n + k] -= md
-        params[0] += ma + md
+            g[P_AT + k] -= reg * params[P_AT + k]
+            g[P_DF + k] -= reg * params[P_DF + k]
+        for k in range(L):
+            g[P_DL + k] -= reg_hfa * params[P_DL + k]
+        params = opt.step(params, g)
+
+        # Identifiabilite : moyennes nulles, absorbees par mu et hfa.
+        for start, cnt, sink in ((P_AT, n, P_MU), (P_DF, n, P_MU),
+                                 (P_TH, L, P_MU), (P_DL, L, P_HFA)):
+            mean = sum(params[start:start + cnt]) / cnt
+            for k in range(cnt):
+                params[start + k] -= mean
+            params[sink] += mean
         if verbose and it % 100 == 0:
-            print("iter %4d  mu=%.4f hfa=%.4f" % (it, params[0], params[1]),
+            print("iter %4d  mu=%.4f hfa=%.4f" % (it, params[P_MU], params[P_HFA]),
                   file=sys.stderr)
 
-    att = {t: params[2 + idx[t]] for t in teams}
-    dfn = {t: params[2 + n + idx[t]] for t in teams}
-    mu, hfa = params[0], params[1]
+    att = {t: params[P_AT + idx[t]] for t in teams}
+    dfn = {t: params[P_DF + idx[t]] for t in teams}
+    theta = {lg: params[P_TH + lidx[lg]] for lg in leagues}
+    delta = {lg: params[P_DL + lidx[lg]] for lg in leagues}
+    mu, hfa = params[P_MU], params[P_HFA]
 
     rho = 0.0
     if fit_rho:
-        lam_cache = []
-        lo_b, hi_b = -0.9, 0.9
+        cache, lo_b, hi_b = [], -0.9, 0.9
         for d in data:
             if d["hg"] > 1 and d["ag"] > 1:
-                continue                    # tau = 1, aucune information
-            h = 0.0 if d["neutral"] else hfa
-            lh = math.exp(mu + h + att[d["home"]] + dfn[d["away"]])
-            la = math.exp(mu + att[d["away"]] + dfn[d["home"]])
-            lam_cache.append((int(d["hg"]), int(d["ag"]), lh, la, d["w"]))
+                continue                    # tau = 1 : aucune information
+            l = lidx[d["league"]]
+            h = 0.0 if d["neutral"] else (hfa + delta[d["league"]])
+            base = mu + theta[d["league"]]
+            lh = math.exp(base + h + att[d["home"]] + dfn[d["away"]])
+            la = math.exp(base + att[d["away"]] + dfn[d["home"]])
+            cache.append((int(d["hg"]), int(d["ag"]), lh, la, d["w"]))
             b_lo, b_hi = rho_bounds(lh, la)
             lo_b, hi_b = max(lo_b, b_lo), min(hi_b, b_hi)
-        if lam_cache and lo_b < hi_b:
+        if cache and lo_b < hi_b:
             def ll(r):
-                s = 0.0
-                for hg, ag, lh, la, w in lam_cache:
-                    t = dixon_coles_tau(hg, ag, lh, la, r)
-                    s += w * safe_log(max(t, 1e-9))
-                return s
+                return sum(w * safe_log(max(dixon_coles_tau(hg, ag, lh, la, r), 1e-9))
+                           for hg, ag, lh, la, w in cache)
             rho = golden_section_max(ll, lo_b, hi_b)
+
+    fisher = None
+    if with_uncertainty:
+        index = {"mu": P_MU, "hfa": P_HFA}
+        for lg, i in lidx.items():
+            index[("theta", lg)] = P_TH + i
+            index[("delta", lg)] = P_DL + i
+        for t, i in idx.items():
+            index[("att", t)] = P_AT + i
+            index[("def", t)] = P_DF + i
+        J = [[0.0] * size for _ in range(size)]
+        for d in data:
+            w = d["w"]
+            i, j, l = idx[d["home"]], idx[d["away"]], lidx[d["league"]]
+            hh = 0.0 if d["neutral"] else (hfa + delta[d["league"]])
+            base = mu + theta[d["league"]]
+            lh = min(math.exp(base + hh + params[P_AT + i] + params[P_DF + j]), 25.0)
+            la = min(math.exp(base + params[P_AT + j] + params[P_DF + i]), 25.0)
+            xh = [P_MU, P_TH + l, P_AT + i, P_DF + j]
+            if not d["neutral"]:
+                xh += [P_HFA, P_DL + l]
+            xa = [P_MU, P_TH + l, P_AT + j, P_DF + i]
+            for vec, lam in ((xh, lh), (xa, la)):
+                c = w * lam
+                for u in vec:
+                    Ju = J[u]
+                    for v in vec:
+                        Ju[v] += c
+        for k in range(n):
+            J[P_AT + k][P_AT + k] += reg
+            J[P_DF + k][P_DF + k] += reg
+        for k in range(L):
+            J[P_DL + k][P_DL + k] += reg_hfa
+        # Crete minime sur les directions identifiees par le seul centrage.
+        ridge = 1e-4 * max(total_w, 1.0)
+        J[P_MU][P_MU] += ridge
+        J[P_HFA][P_HFA] += ridge
+        for k in range(L):
+            J[P_TH + k][P_TH + k] += ridge
+        fisher = {"matrix": J, "index": index}
 
     return DixonColesModel(
         teams, att, dfn, hfa, mu, rho, dict(counts), dict(wsum),
         meta={"n_matches": len(data), "half_life_days": half_life_days,
-              "reg": reg, "ref_date": str(ref_date), "target": target,
-              "total_weight": total_w,
-              "mean_goals_per_team": mean_goals})
-
-
+              "reg": reg, "reg_hfa": reg_hfa, "ref_date": str(ref_date),
+              "target": target, "total_weight": total_w,
+              "n_leagues": L, "mean_goals_per_team": mean_goals},
+        leagues=leagues, theta=theta, delta=delta, team_league=team_league,
+        fisher=fisher)
 # --------------------------------------------------------------------------
 # 8. Elo a buts (modele secondaire / controle de coherence)
 # --------------------------------------------------------------------------
@@ -1400,22 +1621,110 @@ def build_book(grid, ou_lines=DEFAULT_OU_LINES, ah_lines=DEFAULT_AH_LINES,
     return book
 
 
+def probability_sigma(model, home, away, prob_fn, rho=None, neutral=False,
+                      league=None, adj_home=1.0, adj_away=1.0,
+                      max_goals=MAX_GOALS, eps=0.02, lam=None, weight=1.0):
+    """
+    Ecart-type d'une probabilite quelconque, par methode delta.
+
+    On dispose de la covariance des notes (information de Fisher observee).
+    On derive numeriquement la probabilite par rapport a log(lambda_dom) et
+    log(lambda_ext), puis :
+
+        var(P) = g' Sigma g
+
+    Quatre constructions de grille suffisent. C'est ce qui remplace la
+    sigma heuristique par une vraie incertitude d'estimation : une equipe a
+    six matchs produit mecaniquement des probabilites moins sures qu'une
+    equipe a septante, et la mise s'ajuste toute seule.
+
+    `weight` : part de log(lambda) qui provient reellement du modele. Apres
+    fusion avec le marche, log(lambda) = (1-w) log(lambda_modele) + w
+    log(lambda_marche) : seule la fraction (1-w) porte l'incertitude
+    d'estimation du modele, et la variance est donc multipliee par (1-w)^2.
+    A w = 1 (marche pur) l'incertitude du modele disparait, ce qui est exact.
+
+    `lam` : intensites auxquelles evaluer le gradient — celles reellement
+    utilisees apres fusion et ajustements, pas celles du modele brut.
+    """
+    u = model.lambda_uncertainty(home, away, neutral, league)
+    if u is None:
+        return None
+    w2 = float(weight) ** 2
+    var_h, var_a, cov = u[0] * w2, u[1] * w2, u[2] * w2
+    lh, la = lam if lam is not None else model.lambdas(
+        home, away, neutral, adj_home, adj_away, league)
+    r = model.rho if rho is None else rho
+
+    def P(dh, da):
+        return prob_fn(ScoreGrid.from_lambdas(lh * math.exp(dh), la * math.exp(da),
+                                              r, max_goals))
+
+    gh = (P(eps, 0.0) - P(-eps, 0.0)) / (2 * eps)
+    ga = (P(0.0, eps) - P(0.0, -eps)) / (2 * eps)
+    var = gh * gh * var_h + ga * ga * var_a + 2 * gh * ga * cov
+    return math.sqrt(max(var, 0.0))
+
+
+def break_even_shift(grid, prob_fn, odds, rho=None, max_goals=MAX_GOALS,
+                     limit=0.60):
+    """
+    De combien les intensites doivent-elles bouger pour annuler l'avantage ?
+
+    On fait varier conjointement log(lambda_dom) et log(lambda_ext) dans le
+    sens defavorable au pari, et on cherche le deplacement qui ramene
+    l'esperance a zero. Le resultat s'exprime en buts sur le total attendu :
+    « ce pari disparait si le total du match baisse de 0,18 but ».
+
+    C'est la reponse chiffree a la question imposee par le protocole :
+    qu'est-ce qui invaliderait l'analyse ?
+    """
+    lh, lb = grid.lam_h, grid.lam_a
+    if not lh:
+        return None
+    r = grid.rho if rho is None else rho
+    base = prob_fn(grid) * odds - 1.0
+    if base <= 0:
+        return None
+    sign = -1.0 if (prob_fn(ScoreGrid.from_lambdas(lh * 1.02, lb * 1.02, r, max_goals))
+                    > prob_fn(grid)) else 1.0
+
+    def f(d):
+        g = ScoreGrid.from_lambdas(lh * math.exp(sign * d), lb * math.exp(sign * d),
+                                   r, max_goals)
+        return prob_fn(g) * odds - 1.0
+
+    d = bisect(f, 0.0, limit, tol=1e-5)
+    if d is None:
+        return None
+    total = lh + lb
+    return {"log_shift": sign * d,
+            "total_goals_shift": sign * total * (math.exp(d) - 1.0),
+            "direction": "hausse du total" if sign > 0 else "baisse du total"}
+
+
 def estimate_sigma(p_model, p_market, devig_spread=0.0, reliability=1.0,
-                   base=0.010):
+                   base=0.010, model_sigma=None):
     """
     Ecart-type approximatif de la probabilite estimee.
 
     Trois sources d'incertitude combinees en quadrature :
       1. desaccord modele / marche (le plus informatif) ;
       2. sensibilite a la methode de devig ;
-      3. bruit d'estimation du modele (decroit avec le poids effectif de
-         donnees sur l'equipe).
+      3. bruit d'estimation du modele — l'incertitude exacte issue de
+         l'information de Fisher quand elle est disponible
+         (`probability_sigma`), sinon une approximation par le volume de
+         donnees.
     Cette sigma alimente la decote de Kelly : plus on est incertain,
     moins on mise. C'est la difference entre un systeme robuste et un
     systeme qui explose au premier regime de marche inhabituel.
     """
     disagree = abs(p_model - p_market) if p_market is not None else 0.03
-    noise = base / math.sqrt(max(reliability, 0.05))
+    # `model_sigma`, quand il est disponible, est l'incertitude d'estimation
+    # REELLE (information de Fisher) et remplace l'approximation par le
+    # volume de donnees.
+    noise = (model_sigma if model_sigma is not None
+             else base / math.sqrt(max(reliability, 0.05)))
     return math.sqrt((0.45 * disagree) ** 2 + (0.7 * devig_spread) ** 2
                      + noise ** 2)
 
@@ -1494,7 +1803,9 @@ def price_match(lam_home=None, lam_away=None, rho=0.0, model=None,
     if offered:
         value = scan_value(grid, offered, min_edge=min_edge,
                            devig_spread=devig_spread, reliability=reliability,
-                           market_probs=_market_prob_lookup(lk, rho, max_goals))
+                           market_probs=_market_prob_lookup(lk, rho, max_goals),
+                           model=model, home=home, away=away, neutral=neutral,
+                           model_weight=1.0 - result.get("w_market", 0.0))
         result["value_bets"] = value
         result["stake_plan"] = stake_plan(
             [{k: v[k] for k in ("label", "prob", "odds", "sigma", "group",
@@ -1512,81 +1823,165 @@ def _market_prob_lookup(lk, rho, max_goals):
     return ScoreGrid.from_lambdas(lk[0], lk[1], rho, max_goals)
 
 
+def best_price(odds):
+    """
+    Accepte une cote simple ou un dictionnaire {operateur: cote}.
+
+    Renvoie (meilleure cote, operateur, nombre d'operateurs, cote mediane).
+    Un parieur professionnel ne joue jamais une cote moyenne : il joue la
+    meilleure disponible. L'ecart entre la meilleure et la mediane est lui-meme
+    une information — un operateur tres decale est souvent en erreur, ou sait
+    quelque chose.
+    """
+    if odds is None:
+        return None, None, 0, None
+    if isinstance(odds, dict):
+        pairs = [(float(v), k) for k, v in odds.items() if v and float(v) > 1.0]
+        if not pairs:
+            return None, None, 0, None
+        pairs.sort(reverse=True)
+        vals = sorted(v for v, _ in pairs)
+        med = vals[len(vals) // 2] if len(vals) % 2 else \
+            0.5 * (vals[len(vals) // 2 - 1] + vals[len(vals) // 2])
+        return pairs[0][0], pairs[0][1], len(pairs), med
+    o = float(odds)
+    return (o, None, 1, o) if o > 1.0 else (None, None, 0, None)
+
+
+def consensus_probs(odds_sets, method="auto"):
+    """
+    Probabilites de consensus a partir de plusieurs operateurs de reference.
+
+    Chaque jeu de cotes est devigue separement, puis on moyenne dans l'espace
+    des log-cotes (pooling log-lineaire). Moyenner les COTES brutes serait
+    faux : la marge de chaque operateur se retrouverait dans le resultat.
+    """
+    sets = [devig(o, method)["probs"] for o in odds_sets if o]
+    if not sets:
+        return None
+    pooled = log_pool(sets, [1.0] * len(sets))
+    n = len(sets)
+    spread = [max(s[i] for s in sets) - min(s[i] for s in sets)
+              for i in range(len(pooled))] if n > 1 else [0.0] * len(pooled)
+    return {"probs": pooled, "n_books": n, "spread": spread,
+            "max_spread": max(spread)}
+
+
 def scan_value(grid, offered, min_edge=0.02, devig_spread=0.0,
-               reliability=1.0, market_probs=None):
+               reliability=1.0, market_probs=None, model=None, home=None,
+               away=None, neutral=False, league=None, with_sensitivity=True,
+               model_weight=1.0):
     """
     Compare les cotes disponibles au tarif du modele.
 
-    `offered` : dict de cotes proposees, ex.
-        {"1x2": {"home": 2.10, "draw": 3.5, "away": 3.6},
-         "ou": {"2.5": {"over": 1.95, "under": 1.95}},
-         "ah": {"-0.5": {"home": 2.05, "away": 1.90}},
+    `offered` : dict de cotes proposees. Chaque cote peut etre un nombre ou un
+    dictionnaire {operateur: cote} — dans ce cas la MEILLEURE est retenue et
+    l'operateur est indique.
+
+        {"1x2":  {"home": {"BookA": 2.10, "BookB": 2.18}, "draw": 3.5},
+         "ou":   {"2.5": {"over": 1.95, "under": 1.95}},
+         "ah":   {"-0.5": {"home": 2.05, "away": 1.90}},
          "btts": {"yes": 1.80, "no": 2.05}}
+
+    Si `model`, `home` et `away` sont fournis, la sigma de chaque marche est
+    calculee par propagation de l'incertitude d'estimation reelle plutot que
+    par approximation.
     """
     out = []
     h, d, a = grid.result_probs()
     probs_1x2 = {"home": h, "draw": d, "away": a}
+    use_model = (model is not None and home and away
+                 and model.lambda_uncertainty(home, away, neutral, league) is not None)
 
-    def add(label, prob, odds, win=None, lose=None, group="match", mkt=None):
-        if not odds or odds <= 1.0:
+    def add(label, prob, raw_odds, win=None, lose=None, group="match",
+            mkt=None, prob_fn=None):
+        odds, book, n_books, median = best_price(raw_odds)
+        if odds is None:
             return
         e = (win * (odds - 1.0) - lose) if win is not None else (prob * odds - 1.0)
-        sigma = estimate_sigma(prob, mkt, devig_spread, reliability)
+        msig = None
+        if use_model and prob_fn is not None:
+            msig = probability_sigma(model, home, away, prob_fn, rho=grid.rho,
+                                     neutral=neutral, league=league,
+                                     lam=(grid.lam_h, grid.lam_a),
+                                     weight=model_weight)
+        sigma = estimate_sigma(prob, mkt, devig_spread, reliability,
+                               model_sigma=msig)
         row = {"label": label, "prob": prob, "odds": odds,
                "fair": fair_odds(prob), "edge": e, "sigma": sigma,
+               "sigma_model": msig,
                "edge_z": (e / max(sigma * odds, 1e-9)), "group": group}
+        if book:
+            row["book"] = book
+        if n_books > 1:
+            row["n_books"] = n_books
+            row["median_odds"] = median
+            row["shop_gain"] = odds / median - 1.0
         if win is not None:
             row["win"], row["lose"] = win, lose
+        if with_sensitivity and prob_fn is not None and e >= min_edge:
+            row["break_even"] = break_even_shift(grid, prob_fn, odds)
         out.append(row)
 
     o = offered or {}
+    mp = (dict(zip(("home", "draw", "away"), market_probs.result_probs()))
+          if market_probs is not None else {})
     for k, odds in (o.get("1x2") or {}).items():
         if k in probs_1x2:
-            mkt = None
-            if market_probs is not None:
-                mp = dict(zip(("home", "draw", "away"), market_probs.result_probs()))
-                mkt = mp.get(k)
-            add("1X2 " + k, probs_1x2[k], odds, mkt=mkt)
+            i = ("home", "draw", "away").index(k)
+            add("1X2 " + k, probs_1x2[k], odds, mkt=mp.get(k),
+                prob_fn=lambda g, i=i: g.result_probs()[i])
     for k, odds in (o.get("dc") or {}).items():
-        dc = grid.double_chance()
-        if k in dc:
-            add("DC " + k, dc[k], odds)
+        if k in grid.double_chance():
+            add("DC " + k, grid.double_chance()[k], odds,
+                prob_fn=lambda g, k=k: g.double_chance()[k])
+    for k, odds in (o.get("dnb") or {}).items():
+        if k in grid.draw_no_bet():
+            add("DNB " + k, grid.draw_no_bet()[k], odds,
+                prob_fn=lambda g, k=k: g.draw_no_bet()[k])
     for k, odds in (o.get("btts") or {}).items():
-        b = grid.btts()
-        if k in b:
-            add("BTTS " + k, b[k], odds)
+        if k in grid.btts():
+            add("BTTS " + k, grid.btts()[k], odds,
+                prob_fn=lambda g, k=k: g.btts()[k])
     for line, sides in (o.get("ou") or {}).items():
         ou = grid.over_under(float(line))
         for side, odds in sides.items():
             if side in ou:
                 w = ou[side]
                 add("O/U %s %s" % (line, side), w["prob_norm"], odds,
-                    w["win"], w["lose"], group="total")
+                    w["win"], w["lose"], group="total",
+                    prob_fn=lambda g, l=float(line), s=side:
+                        g.over_under(l)[s]["prob_norm"])
     for line, sides in (o.get("ah") or {}).items():
         ah = grid.asian_handicap(float(line))
         for side, odds in sides.items():
             if side in ah:
                 w = ah[side]
                 add("AH %s %s" % (line, side), w["prob_norm"], odds,
-                    w["win"], w["lose"], group="handicap")
+                    w["win"], w["lose"], group="handicap",
+                    prob_fn=lambda g, l=float(line), s=side:
+                        g.asian_handicap(l)[s]["prob_norm"])
     for side, lines in (o.get("team_totals") or {}).items():
         for line, sides in lines.items():
             tt = grid.team_total(side, float(line))
-            for s, odds in sides.items():
-                if s in tt:
-                    w = tt[s]
-                    add("TT %s %s %s" % (side, line, s), w["prob_norm"], odds,
-                        w["win"], w["lose"], group="total")
+            for s_ in sides:
+                if s_ in tt:
+                    w = tt[s_]
+                    add("TT %s %s %s" % (side, line, s_), w["prob_norm"],
+                        sides[s_], w["win"], w["lose"], group="total",
+                        prob_fn=lambda g, sd=side, l=float(line), ss=s_:
+                            g.team_total(sd, l)[ss]["prob_norm"])
     for score, odds in (o.get("cs") or {}).items():
         try:
             i, j = (int(x) for x in str(score).replace(":", "-").split("-"))
         except ValueError:
             continue
-        add("CS " + str(score), grid.correct_score(i, j), odds, group="cs")
+        add("CS " + str(score), grid.correct_score(i, j), odds, group="cs",
+            prob_fn=lambda g, i=i, j=j: g.correct_score(i, j))
 
     out.sort(key=lambda r: -r["edge"])
     for r in out:
-        r["value"] = r["edge"] >= min_edge
+        r["value"] = r["edge"] >= min_edge and r["edge_z"] >= 1.0
     return out
 
 
@@ -1664,11 +2059,29 @@ def render_match(res, home="Domicile", away="Exterieur", competition="",
     if vb:
         L.append("")
         L.append("Comparaison au marche")
-        L.append("   %-24s %6s %6s %8s %6s" % ("pari", "cote", "juste", "edge", "z"))
+        multi = any("book" in v for v in vb)
+        L.append("   %-22s %6s %6s %8s %6s%s"
+                 % ("pari", "cote", "juste", "edge", "z",
+                    "  operateur" if multi else ""))
         for v in vb[:max_bets]:
-            L.append("   %-24s %6.2f %6.2f %+7.2f%% %6.2f%s"
+            tail = ""
+            if "book" in v:
+                tail = "  %-10s" % v["book"]
+                if v.get("shop_gain"):
+                    tail += "(+%.1f%% vs mediane)" % (100 * v["shop_gain"])
+            L.append("   %-22s %6.2f %6.2f %+7.2f%% %6.2f%s%s"
                      % (v["label"], v["odds"], v["fair"], 100 * v["edge"],
-                        v["edge_z"], "  <<<" if v["value"] else ""))
+                        v["edge_z"], tail, "  <<<" if v["value"] else ""))
+        sens = [v for v in vb if v.get("break_even")]
+        if sens:
+            L.append("")
+            L.append("Seuil de bascule (ce qui annule l'avantage)")
+            for v in sens[:4]:
+                be = v["break_even"]
+                L.append("   %-22s s'annule si le total du match %s de %.2f but"
+                         % (v["label"],
+                            "monte" if be["total_goals_shift"] > 0 else "baisse",
+                            abs(be["total_goals_shift"])))
     sp = res.get("stake_plan")
     if sp:
         played = [b for b in sp["bets"] if b["stake"] > 0]
@@ -2248,13 +2661,220 @@ def render_log_report(rep):
 
 
 # --------------------------------------------------------------------------
+# 13 ter. Recalibration des probabilites
+# --------------------------------------------------------------------------
+
+class Calibrator:
+    """
+    Recalibration par mise a l'echelle vectorielle (vector scaling).
+
+        p_calibre  proportionnel a  exp( log(p_k) / T  +  b_k )
+
+    `T` corrige la sur-confiance globale (T > 1 aplatit les probabilites),
+    les `b_k` corrigent un biais systematique par issue — typiquement le nul,
+    que la plupart des modeles sous-estiment.
+
+    Trois parametres seulement : le risque de sur-ajustement est negligeable,
+    et la correction est monotone, donc elle ne peut pas inverser un
+    classement de probabilites.
+    """
+
+    def __init__(self, inv_t=1.0, biases=None, meta=None):
+        self.inv_t = inv_t
+        self.biases = list(biases or [0.0, 0.0, 0.0])
+        self.meta = meta or {}
+
+    @property
+    def temperature(self):
+        return 1.0 / self.inv_t if self.inv_t else float("inf")
+
+    def apply(self, probs):
+        z = [safe_log(max(p, EPS)) for p in probs]
+        s = [self.inv_t * z[k] + self.biases[k] for k in range(len(z))]
+        m = max(s)
+        e = [math.exp(v - m) for v in s]
+        tot = sum(e)
+        return [v / tot for v in e]
+
+    def is_identity(self):
+        return abs(self.inv_t - 1.0) < 1e-6 and all(abs(b) < 1e-6 for b in self.biases)
+
+    def to_dict(self):
+        return {"inv_t": self.inv_t, "biases": self.biases, "meta": self.meta}
+
+    @staticmethod
+    def from_dict(d):
+        return Calibrator(d["inv_t"], d["biases"], d.get("meta"))
+
+
+def fit_calibration(preds, outcomes, max_iter=500, lr=0.05, l2=1e-3):
+    """
+    Ajuste la recalibration par minimisation de la log-perte.
+
+    A n'ajuster QUE sur des predictions hors echantillon : recalibrer sur les
+    donnees d'ajustement du modele ne corrige rien et masque le probleme.
+    """
+    if len(preds) < 30:
+        return Calibrator(meta={"n": len(preds), "fitted": False})
+    k = len(preds[0])
+    params = [1.0] + [0.0] * k          # [1/T, b_0..b_{k-1}]
+    opt = Adam(len(params), lr=lr)
+    logs = [[safe_log(max(p, EPS)) for p in row] for row in preds]
+    for _ in range(max_iter):
+        g = [0.0] * len(params)
+        for z, y in zip(logs, outcomes):
+            sc = [params[0] * z[i] + params[1 + i] for i in range(k)]
+            mx = max(sc)
+            e = [math.exp(v - mx) for v in sc]
+            tot = sum(e)
+            q = [v / tot for v in e]
+            for i in range(k):
+                r = q[i] - (1.0 if i == y else 0.0)
+                g[0] -= r * z[i]                 # on maximise -logperte
+                g[1 + i] -= r
+        for i in range(k):
+            g[1 + i] -= l2 * params[1 + i] * len(preds)
+        g[0] -= l2 * (params[0] - 1.0) * len(preds)
+        params = opt.step(params, g)
+        mean_b = sum(params[1:]) / k             # identifiabilite du softmax
+        for i in range(k):
+            params[1 + i] -= mean_b
+    cal = Calibrator(params[0], params[1:],
+                     meta={"n": len(preds), "fitted": True})
+    before = sum(log_loss(p, y) for p, y in zip(preds, outcomes)) / len(preds)
+    after = sum(log_loss(cal.apply(p), y) for p, y in zip(preds, outcomes)) / len(preds)
+    cal.meta.update({"log_loss_before": before, "log_loss_after": after,
+                     "temperature": cal.temperature})
+    return cal
+
+
+# --------------------------------------------------------------------------
+# 13 quater. Reglage automatique des hyperparametres
+# --------------------------------------------------------------------------
+
+def tune_hyperparameters(matches, half_lives=(90.0, 150.0, 240.0),
+                         regs=(0.5, 1.0, 2.0),
+                         w_markets=(0.0, 0.3, 0.5, 0.65, 0.8, 1.0),
+                         min_train=300, refit_every_days=30, max_iter=200,
+                         warm_iter=60, train_window_days=1460, verbose=False):
+    """
+    Choisit demi-vie, retrecissement et poids du marche par RPS hors
+    echantillon — au lieu de les fixer a l'intuition.
+
+    La documentation prescrit de regler ces parametres par backtest ; cette
+    fonction le fait reellement. Deux optimisations la rendent praticable :
+
+    1. **Les intensites du marche ne dependent pas des hyperparametres.**
+       Elles sont calculees une seule fois pour tous les matchs (c'est le
+       poste le plus couteux), puis reutilisees pour chaque configuration.
+    2. **Le poids du marche est gratuit.** A ajustement donne, toutes les
+       valeurs de `w` se scorent dans la meme passe.
+
+    Le cout est donc |demi-vies| x |retrecissements| ajustements, pas le
+    produit des trois grilles.
+    """
+    ms = sorted([m for m in matches if m.get("date")], key=lambda m: m["date"])
+    if len(ms) <= min_train:
+        raise ValueError("pas assez de matchs (%d) pour min_train=%d"
+                         % (len(ms), min_train))
+
+    # --- passe unique : marche + resultats
+    market = {}
+    for i, m in enumerate(ms):
+        if i < min_train:
+            continue
+        if all(m.get(k) for k in ("odds_h", "odds_d", "odds_a")):
+            dv = devig([m["odds_h"], m["odds_d"], m["odds_a"]])
+            market[i] = {"probs": dv["probs"],
+                         "lams": lambdas_from_1x2(*dv["probs"], rho=-0.04),
+                         "outcome": 0 if m["hg"] > m["ag"] else
+                                    (1 if m["hg"] == m["ag"] else 2)}
+    if not market:
+        raise ValueError("aucune cote exploitable : le reglage exige un marche")
+    if verbose:
+        print("marche pre-calcule sur %d matchs" % len(market), file=sys.stderr)
+
+    base_rps = sum(rps(v["probs"], v["outcome"]) for v in market.values()) / len(market)
+    results = []
+    for hl in half_lives:
+        for rg in regs:
+            model, last_fit = None, None
+            acc = {w: [] for w in w_markets}
+            acc_model = []
+            for i, m in enumerate(ms):
+                if i not in market:
+                    continue
+                if (model is None or last_fit is None
+                        or (m["date"] - last_fit).days >= refit_every_days):
+                    train = [x for x in ms[:i]
+                             if (m["date"] - x["date"]).days <= train_window_days]
+                    if len(train) < min_train:
+                        train = ms[:i]
+                    model = fit_dixon_coles(
+                        train, half_life_days=hl, reg=rg, ref_date=m["date"],
+                        max_iter=(warm_iter if model else max_iter),
+                        init_model=model, with_uncertainty=False)
+                    last_fit = m["date"]
+                if not (model.known(m["home"]) and model.known(m["away"])):
+                    continue
+                lm = model.lambdas(m["home"], m["away"])
+                lk = market[i]["lams"]
+                y = market[i]["outcome"]
+                acc_model.append(rps(list(ScoreGrid.from_lambdas(
+                    lm[0], lm[1], model.rho).result_probs()), y))
+                for w in w_markets:
+                    bl = blend_lambdas(lm, lk, w)
+                    acc[w].append(rps(list(ScoreGrid.from_lambdas(
+                        bl[0], bl[1], model.rho).result_probs()), y))
+            if not acc_model:
+                continue
+            for w in w_markets:
+                results.append({
+                    "half_life_days": hl, "reg": rg, "w_market": w,
+                    "rps": sum(acc[w]) / len(acc[w]), "n": len(acc[w]),
+                    "gain_vs_market": base_rps - sum(acc[w]) / len(acc[w]),
+                })
+            if verbose:
+                best_w = min(w_markets, key=lambda w: sum(acc[w]) / len(acc[w]))
+                print("  demi-vie %5.0f  reg %.1f  -> meilleur w %.2f  RPS %.5f"
+                      % (hl, rg, best_w, sum(acc[best_w]) / len(acc[best_w])),
+                      file=sys.stderr)
+
+    results.sort(key=lambda r: r["rps"])
+    best = results[0] if results else None
+    return {
+        "market_rps": base_rps, "n_matches": len(market),
+        "best": best,
+        "verdict": ("le modele ameliore le marche" if best and best["gain_vs_market"] > 0
+                    else "le modele n'ameliore pas le marche : ne pas parier le 1X2"),
+        "grid": results,
+        "sensitivity": {
+            "half_life": _marginal(results, "half_life_days"),
+            "reg": _marginal(results, "reg"),
+            "w_market": _marginal(results, "w_market"),
+        },
+    }
+
+
+def _marginal(results, key):
+    """RPS minimal atteignable pour chaque valeur d'un hyperparametre."""
+    best = {}
+    for r in results:
+        v = r[key]
+        if v not in best or r["rps"] < best[v]:
+            best[v] = r["rps"]
+    return [{"value": v, "best_rps": best[v]} for v in sorted(best)]
+
+
+# --------------------------------------------------------------------------
 # 14. Backtest walk-forward
 # --------------------------------------------------------------------------
 
 def backtest(matches, min_train=150, refit_every_days=21, half_life_days=180.0,
              reg=1.0, w_market=0.6, min_edge=0.03, kelly_fraction=0.25,
              bankroll=1000.0, max_iter=250, warm_iter=90, max_per_bet=0.02,
-             train_window_days=1460, sigma_z=1.0, verbose=False):
+             train_window_days=1460, sigma_z=1.0, calibrate=False,
+             calib_min=150, verbose=False):
     """
     Validation temporelle stricte : a chaque date, le modele n'a vu QUE le
     passe. Aucune fuite d'information (la fuite la plus frequente dans les
@@ -2267,6 +2887,11 @@ def backtest(matches, min_train=150, refit_every_days=21, half_life_days=180.0,
       - fusion modele + marche.
     Un systeme qui ne bat pas le marche en RPS n'a aucune raison de generer
     du CLV positif. C'est le test d'echec le plus important du projet.
+
+    `calibrate=True` ajuste en continu une recalibration (mise a l'echelle
+    vectorielle) sur les SEULES predictions passees, et l'applique aux
+    suivantes. Le rapport donne alors les metriques avant et apres : on voit
+    si la correction apporte quelque chose, sans fuite d'information.
     """
     ms = sorted([m for m in matches if m.get("date")], key=lambda m: m["date"])
     if len(ms) <= min_train:
@@ -2275,10 +2900,13 @@ def backtest(matches, min_train=150, refit_every_days=21, half_life_days=180.0,
 
     model = None
     last_fit = None
-    scores = {"model": [], "market": [], "blend": []}
-    briers = {"model": [], "market": [], "blend": []}
-    lls = {"model": [], "market": [], "blend": []}
-    rel_pairs = []
+    keys = ["model", "market", "blend"] + (["calibrated"] if calibrate else [])
+    scores = {k: [] for k in keys}
+    briers = {k: [] for k in keys}
+    lls = {k: [] for k in keys}
+    rel_pairs, rel_pairs_cal = [], []
+    calibrator = Calibrator()
+    past_preds, past_outcomes = [], []
     bets, returns, clvs = [], [], []
     bank = bankroll
     peak, max_dd = bankroll, 0.0
@@ -2299,6 +2927,8 @@ def backtest(matches, min_train=150, refit_every_days=21, half_life_days=180.0,
                 ref_date=m["date"], max_iter=(warm_iter if model else max_iter),
                 init_model=model)
             last_fit = m["date"]
+            if calibrate and len(past_preds) >= calib_min:
+                calibrator = fit_calibration(past_preds, past_outcomes)
             if verbose:
                 print("  refit @ %s sur %d matchs" % (m["date"], len(train)),
                       file=sys.stderr)
@@ -2323,8 +2953,15 @@ def backtest(matches, min_train=150, refit_every_days=21, half_life_days=180.0,
 
         outcome = 0 if m["hg"] > m["ag"] else (1 if m["hg"] == m["ag"] else 2)
         n_priced += 1
-        for name, pp in (("model", p_model), ("blend", p_blend),
-                         ("market", p_market)):
+        p_used = p_blend
+        series = [("model", p_model), ("blend", p_blend), ("market", p_market)]
+        if calibrate:
+            p_cal = calibrator.apply(p_blend)
+            series.append(("calibrated", p_cal))
+            p_used = p_cal
+            for k in range(3):
+                rel_pairs_cal.append((p_cal[k], 1 if outcome == k else 0))
+        for name, pp in series:
             if pp is None:
                 continue
             scores[name].append(rps(pp, outcome))
@@ -2332,17 +2969,19 @@ def backtest(matches, min_train=150, refit_every_days=21, half_life_days=180.0,
             lls[name].append(log_loss(pp, outcome))
         for k in range(3):
             rel_pairs.append((p_blend[k], 1 if outcome == k else 0))
+        past_preds.append(list(p_blend))
+        past_outcomes.append(outcome)
 
         if has_odds:
             odds = [m["odds_h"], m["odds_d"], m["odds_a"]]
             spread = max(dv["method_spread"])
             rel = min(model.reliability(m["home"]), model.reliability(m["away"]))
             for k, lab in enumerate(("1", "X", "2")):
-                e = p_blend[k] * odds[k] - 1.0
+                e = p_used[k] * odds[k] - 1.0
                 if e < min_edge:
                     continue
-                sig = estimate_sigma(p_blend[k], p_market[k], spread, rel)
-                f = min(kelly_with_uncertainty(p_blend[k], sig, odds[k],
+                sig = estimate_sigma(p_used[k], p_market[k], spread, rel)
+                f = min(kelly_with_uncertainty(p_used[k], sig, odds[k],
                                                kelly_fraction, z=sigma_z),
                         max_per_bet)
                 if f <= 0:
@@ -2355,7 +2994,7 @@ def backtest(matches, min_train=150, refit_every_days=21, half_life_days=180.0,
                 r = profit / stake if stake else 0.0
                 returns.append(r)
                 row = {"date": str(m["date"]), "match": "%s-%s" % (m["home"], m["away"]),
-                       "pick": lab, "odds": odds[k], "prob": p_blend[k],
+                       "pick": lab, "odds": odds[k], "prob": p_used[k],
                        "edge": e, "stake": stake, "profit": profit,
                        "bank": bank, "won": outcome == k}
                 if all(m.get(c) for c in ("close_h", "close_d", "close_a")):
@@ -2378,6 +3017,8 @@ def backtest(matches, min_train=150, refit_every_days=21, half_life_days=180.0,
         "rps_edge_vs_market": (avg(scores["market"]) - avg(scores["blend"]))
         if scores["market"] and scores["blend"] else None,
         "calibration": reliability_bins(rel_pairs),
+        "calibration_after": reliability_bins(rel_pairs_cal) if rel_pairs_cal else None,
+        "calibrator": (calibrator.to_dict() if calibrate else None),
         "betting": {
             "n_bets": len(bets),
             "final_bankroll": bank,
@@ -2393,7 +3034,7 @@ def backtest(matches, min_train=150, refit_every_days=21, half_life_days=180.0,
         },
         "params": {"half_life_days": half_life_days, "reg": reg,
                    "w_market": w_market, "min_edge": min_edge,
-                   "kelly_fraction": kelly_fraction},
+                   "kelly_fraction": kelly_fraction, "calibrate": calibrate},
     }
     return {"summary": summary, "bets": bets, "model": model}
 
@@ -2444,6 +3085,64 @@ def synthetic_league(n_teams=18, seasons=3, seed=42, mu=0.10, hfa=0.22,
     matches.sort(key=lambda m: m["date"])
     return {"matches": matches, "att": att, "def": dfn, "mu": mu, "hfa": hfa,
             "teams": teams}
+
+
+def synthetic_pyramid(n_per_div=14, seasons=4, seed=7, n_promoted=2,
+                      mu=0.10, hfa=0.22, gap=0.45, theta_gap=-0.12,
+                      start=date(2021, 8, 1)):
+    """
+    Genere une pyramide a deux divisions avec montees et descentes.
+
+    Sert a verifier que l'ajustement conjoint retrouve bien :
+      - l'ecart de niveau entre divisions (`gap`, en note globale) ;
+      - l'ecart de niveau de BUTS entre divisions (`theta_gap`) ;
+      - des notes comparables d'une division a l'autre.
+
+    Les equipes ont une force GLOBALE fixe ; seule leur division change. Un
+    modele qui ajuste chaque championnat separement ne peut pas les comparer.
+    """
+    rng = random.Random(seed)
+    teams = ["T%02d" % i for i in range(2 * n_per_div)]
+    att, dfn = {}, {}
+    for k, t in enumerate(teams):
+        # les equipes du haut de la pyramide sont initialement plus fortes
+        lift = gap / 2.0 if k < n_per_div else -gap / 2.0
+        att[t] = rng.gauss(lift / 2.0, 0.22)
+        dfn[t] = rng.gauss(-lift / 2.0, 0.20)
+    ma = sum(att.values()) / len(teams)
+    md = sum(dfn.values()) / len(teams)
+    att = {t: v - ma for t, v in att.items()}
+    dfn = {t: v - md for t, v in dfn.items()}
+    theta = {"D1": 0.0, "D2": theta_gap}
+
+    div = {t: ("D1" if k < n_per_div else "D2") for k, t in enumerate(teams)}
+    matches, d = [], start
+    for s in range(seasons):
+        for lg in ("D1", "D2"):
+            members = [t for t in teams if div[t] == lg]
+            pairs = [(h, a) for h in members for a in members if h != a]
+            rng.shuffle(pairs)
+            for k, (h, a) in enumerate(pairs):
+                base = mu + theta[lg]
+                lh = math.exp(base + hfa + att[h] + dfn[a])
+                la = math.exp(base + att[a] + dfn[h])
+                matches.append({"date": d + timedelta(days=(k * 300) // len(pairs)),
+                                "home": h, "away": a, "league": lg,
+                                "hg": _rpois(rng, lh), "ag": _rpois(rng, la),
+                                "season": "S%d" % s})
+        # montees / descentes selon la force reelle
+        d1 = sorted((t for t in teams if div[t] == "D1"),
+                    key=lambda t: att[t] - dfn[t])
+        d2 = sorted((t for t in teams if div[t] == "D2"),
+                    key=lambda t: -(att[t] - dfn[t]))
+        for t in d1[:n_promoted]:
+            div[t] = "D2"
+        for t in d2[:n_promoted]:
+            div[t] = "D1"
+        d = d + timedelta(days=365)
+    matches.sort(key=lambda m: m["date"])
+    return {"matches": matches, "att": att, "def": dfn, "theta": theta,
+            "mu": mu, "hfa": hfa, "teams": teams, "division": div}
 
 
 def add_synthetic_odds(matches, rho=-0.05, margin=0.045, noise=0.06, seed=7,
@@ -2683,6 +3382,105 @@ def selftest(verbose=True):
             abs(model.rho) < 0.06)
     t.check("table triee", model.table()[0]["rank"] == 1)
 
+    print("\n[10 bis] Ajustement conjoint multi-championnats")
+    pyr = synthetic_pyramid(n_per_div=14, seasons=4, seed=7)
+    joint = fit_dixon_coles(pyr["matches"], half_life_days=1e6, reg=0.6, max_iter=800)
+    tt = pyr["teams"]
+    c_joint = _corr([pyr["att"][x] - pyr["def"][x] for x in tt],
+                    [joint.att[x] - joint.dfn[x] for x in tt])
+    sep = {lg: fit_dixon_coles([m for m in pyr["matches"] if m["league"] == lg],
+                               half_life_days=1e6, reg=0.6, max_iter=800)
+           for lg in ("D1", "D2")}
+    naive, truth = [], []
+    for x in tt:
+        lg = joint.league_of(x)
+        if x in sep[lg].att:
+            naive.append(sep[lg].att[x] - sep[lg].dfn[x])
+            truth.append(pyr["att"][x] - pyr["def"][x])
+    c_sep = _corr(truth, naive)
+    t.check("deux championnats detectes", len(joint.leagues) == 2)
+    t.check("notes globales comparables entre divisions (%.3f)" % c_joint,
+            c_joint > 0.88)
+    t.check("l'ajustement conjoint bat la concatenation de deux ajustements "
+            "separes (%.3f > %.3f)" % (c_joint, c_sep), c_joint > c_sep + 0.05)
+    t.check("decalage de niveau de buts du bon signe",
+            joint.theta["D2"] < joint.theta["D1"])
+    t.check("division de chaque equipe connue",
+            all(joint.league_of(x) in ("D1", "D2") for x in tt))
+    t.check("le niveau moyen de D1 depasse celui de D2",
+            joint.league_table()[0]["league"] == "D1")
+    t.check("un seul championnat : comportement inchange",
+            len(fit_dixon_coles(syn["matches"], max_iter=50).leagues) == 1)
+
+    print("\n[10 ter] Incertitude d'estimation (information de Fisher)")
+    sig_small = math.sqrt(fit_dixon_coles(
+        synthetic_league(n_teams=14, seasons=1, seed=3)["matches"],
+        half_life_days=1e6, reg=0.6, max_iter=400
+    ).lambda_uncertainty("T00", "T01")[0])
+    big = fit_dixon_coles(synthetic_league(n_teams=14, seasons=4, seed=3)["matches"],
+                          half_life_days=1e6, reg=0.6, max_iter=400)
+    sig_big = math.sqrt(big.lambda_uncertainty("T00", "T01")[0])
+    t.check("l'incertitude decroit avec les donnees (%.4f -> %.4f)"
+            % (sig_small, sig_big), sig_big < sig_small)
+    t.check("decroissance compatible avec 1/racine(n)",
+            1.4 < sig_small / sig_big < 3.0)
+    t.check("matrice de covariance symetrique",
+            all(abs(big.covariance()[i][j] - big.covariance()[j][i]) < 1e-9
+                for i in range(0, 20) for j in range(0, 20)))
+    t.check("variances positives",
+            all(big.covariance()[i][i] > 0 for i in range(len(big.covariance()))))
+    ps = probability_sigma(big, "T00", "T01", lambda g: g.result_probs()[0])
+    t.check("sigma d'une probabilite dans (0 ; 0.2) : %.4f" % ps, 0.0 < ps < 0.2)
+    t.check("modele recharge : pas d'incertitude, pas d'erreur",
+            DixonColesModel.from_dict(big.to_dict())
+            .lambda_uncertainty("T00", "T01") is None)
+
+    print("\n[10 quater] Recalibration")
+    rng_c = random.Random(5)
+    base_p = [0.50, 0.28, 0.22]
+    sharp, ys = [], []
+    for _ in range(1500):
+        q = [x ** 1.6 for x in base_p]
+        ssum = sum(q)
+        sharp.append([x / ssum for x in q])
+        u, cum, y = rng_c.random(), 0.0, 2
+        for k, x in enumerate(base_p):
+            cum += x
+            if u < cum:
+                y = k
+                break
+        ys.append(y)
+    cal = fit_calibration(sharp, ys)
+    t.check("temperature > 1 sur un modele sur-confiant (%.3f)" % cal.temperature,
+            cal.temperature > 1.15)
+    t.check("la log-perte s'ameliore",
+            cal.meta["log_loss_after"] < cal.meta["log_loss_before"])
+    t.close("probabilites recalibrees somme=1", sum(cal.apply([0.5, 0.3, 0.2])), 1.0, 1e-12)
+    t.check("recalibration monotone (l'ordre est preserve)",
+            sorted(range(3), key=lambda i: -cal.apply([0.5, 0.3, 0.2])[i]) == [0, 1, 2])
+    t.check("echantillon trop petit -> identite",
+            fit_calibration([[0.5, 0.3, 0.2]] * 10, [0] * 10).is_identity())
+    t.close("Calibrator identite ne change rien",
+            Calibrator().apply([0.5, 0.3, 0.2])[1], 0.3, 1e-12)
+
+    print("\n[10 quinquies] Comparaison des operateurs")
+    o, book, nb, med = best_price({"A": 2.10, "B": 2.25, "C": 2.05})
+    t.close("meilleure cote retenue", o, 2.25, 1e-12)
+    t.check("operateur identifie", book == "B")
+    t.check("nombre d'operateurs", nb == 3)
+    t.close("cote mediane", med, 2.10, 1e-12)
+    t.check("cote simple acceptee", best_price(2.10)[0] == 2.10)
+    t.check("cote invalide ecartee", best_price({"A": 0.9})[0] is None)
+    cons = consensus_probs([[2.10, 3.40, 3.60], [2.05, 3.50, 3.70]])
+    t.close("consensus somme=1", sum(cons["probs"]), 1.0, 1e-9)
+    t.check("dispersion entre operateurs mesuree", cons["max_spread"] > 0)
+    t.check("consensus encadre par les deux operateurs",
+            min(devig([2.10, 3.40, 3.60])["probs"][0],
+                devig([2.05, 3.50, 3.70])["probs"][0]) - 1e-9
+            <= cons["probs"][0] <=
+            max(devig([2.10, 3.40, 3.60])["probs"][0],
+                devig([2.05, 3.50, 3.70])["probs"][0]) + 1e-9)
+
     print("\n[11] Tarification complete")
     res = price_match(lam_home=1.55, lam_away=1.15, rho=-0.05,
                       market={"1x2": [2.20, 3.40, 3.30]}, w_market=0.5,
@@ -2905,6 +3703,14 @@ def _cmd_fit(a):
           % (model.meta["n_matches"], len(model.teams), a.out))
     print("mu=%.4f  avantage_terrain=%.4f (x%.3f sur lambda_dom)  rho=%.4f"
           % (model.mu, model.home_adv, math.exp(model.home_adv), model.rho))
+    if len(model.leagues) > 1:
+        print("%d championnats ajustes ensemble : notes comparables entre eux"
+              % len(model.leagues))
+        for r in model.league_table():
+            print("   %-10s %2d equipes  %.2f buts/match  avantage %.3f  "
+                  "niveau moyen %+.3f"
+                  % (r["league"], r["n_teams"], r["goal_level"], r["home_adv"],
+                     r["mean_team_rating"]))
     for r in model.table()[:a.top]:
         print("  %2d. %-24s note=%+.3f  att=%+.3f  def=%+.3f  (n=%d)"
               % (r["rank"], r["team"], r["rating"], r["attack"], r["defense"],
@@ -2913,12 +3719,23 @@ def _cmd_fit(a):
 
 def _cmd_table(a):
     model = DixonColesModel.from_dict(_load_json_arg(a.model))
-    rows = model.table()
-    print("%-4s %-26s %8s %8s %8s %6s" % ("#", "equipe", "note", "att", "def", "n"))
+    if len(model.leagues) > 1:
+        print("NIVEAU DES CHAMPIONNATS (notes d'equipes comparables entre eux)")
+        print("%-12s %6s %10s %10s %12s"
+              % ("championnat", "n", "buts/match", "avant.terr", "note moyenne"))
+        for r in model.league_table():
+            print("%-12s %6d %10.2f %10.3f %12.4f"
+                  % (r["league"], r["n_teams"], r["goal_level"], r["home_adv"],
+                     r["mean_team_rating"]))
+        print()
+    rows = model.table(league=a.league)
+    multi = len(model.leagues) > 1
+    print("%-4s %-24s %-8s %8s %8s %8s %6s"
+          % ("#", "equipe", "champ." if multi else "", "note", "att", "def", "n"))
     for r in rows[:a.top]:
-        print("%-4d %-26s %+8.3f %+8.3f %+8.3f %6d"
-              % (r["rank"], r["team"], r["rating"], r["attack"],
-                 r["defense"], r["matches"]))
+        print("%-4d %-24s %-8s %+8.3f %+8.3f %+8.3f %6d"
+              % (r["rank"], r["team"], (r["league"] or "") if multi else "",
+                 r["rating"], r["attack"], r["defense"], r["matches"]))
 
 
 def _cmd_predict(a):
@@ -2943,7 +3760,8 @@ def _cmd_backtest(a):
     bt = backtest(matches, min_train=a.min_train, refit_every_days=a.refit,
                   half_life_days=a.half_life, reg=a.reg, w_market=a.w,
                   min_edge=a.min_edge, kelly_fraction=a.kelly,
-                  bankroll=a.bankroll, verbose=a.verbose)
+                  bankroll=a.bankroll, calibrate=a.calibrate,
+                  verbose=a.verbose)
     s = bt["summary"]
     print(write_json(s, a.out))
     if a.bets_out:
@@ -2961,6 +3779,44 @@ def _cmd_calib(a):
     if a.out:
         write_json(rep, a.out)
     print(write_json(rep) if a.json else render_log_report(rep))
+
+
+def _cmd_tune(a):
+    matches = load_matches_csv(a.csv)
+    if a.league:
+        matches = [m for m in matches if str(m.get("league", "")) == a.league]
+    res = tune_hyperparameters(
+        matches, half_lives=tuple(a.half_lives), regs=tuple(a.regs),
+        w_markets=tuple(a.w_markets), min_train=a.min_train,
+        refit_every_days=a.refit, max_iter=a.iters, verbose=True)
+    if a.out:
+        write_json(res, a.out)
+    if a.json:
+        print(write_json(res))
+        return
+    b = res["best"]
+    print("\nRPS du marche seul : %.5f  (%d matchs)"
+          % (res["market_rps"], res["n_matches"]))
+    if not b:
+        print("aucune configuration exploitable")
+        return
+    print("MEILLEURE CONFIGURATION")
+    print("   demi-vie %.0f j  ·  reg %.2f  ·  w_marche %.2f"
+          % (b["half_life_days"], b["reg"], b["w_market"]))
+    print("   RPS %.5f   gain sur le marche %+.5f" % (b["rps"], b["gain_vs_market"]))
+    print("   %s" % res["verdict"])
+    print("\nSensibilite marginale (meilleur RPS atteignable par valeur)")
+    for key, lab in (("half_life", "demi-vie"), ("reg", "retrecissement"),
+                     ("w_market", "poids du marche")):
+        cells = "  ".join("%s: %.5f" % (x["value"], x["best_rps"])
+                          for x in res["sensitivity"][key])
+        print("   %-16s %s" % (lab, cells))
+    print("\nDix meilleures configurations")
+    print("   %8s %6s %8s %10s %10s" % ("demi-vie", "reg", "w", "RPS", "gain"))
+    for r in res["grid"][:10]:
+        print("   %8.0f %6.2f %8.2f %10.5f %+10.5f"
+              % (r["half_life_days"], r["reg"], r["w_market"], r["rps"],
+                 r["gain_vs_market"]))
 
 
 def _cmd_season(a):
@@ -3072,6 +3928,7 @@ def build_parser():
     s = sub.add_parser("table", help="affiche le classement des forces")
     s.add_argument("--model", required=True)
     s.add_argument("--top", type=int, default=30)
+    s.add_argument("--league", help="restreindre a un championnat")
     s.set_defaults(func=_cmd_table)
 
     s = sub.add_parser("predict", help="tarifie un match du modele")
@@ -3105,6 +3962,8 @@ def build_parser():
     s.add_argument("--bankroll", type=float, default=1000.0)
     s.add_argument("--out")
     s.add_argument("--bets-out")
+    s.add_argument("--calibrate", action="store_true",
+                   help="recalibration glissante ajustee sur le seul passe")
     s.add_argument("--verbose", action="store_true")
     s.set_defaults(func=_cmd_backtest)
 
@@ -3121,6 +3980,21 @@ def build_parser():
     s.add_argument("--min-edge", type=float, default=0.03)
     s.add_argument("--out")
     s.set_defaults(func=_cmd_live)
+
+    s = sub.add_parser("tune", help="regle demi-vie, retrecissement et poids du marche par RPS")
+    s.add_argument("--csv", required=True)
+    s.add_argument("--league")
+    s.add_argument("--half-lives", type=float, nargs="+",
+                   default=[90.0, 150.0, 240.0], dest="half_lives")
+    s.add_argument("--regs", type=float, nargs="+", default=[0.5, 1.0, 2.0])
+    s.add_argument("--w-markets", type=float, nargs="+", dest="w_markets",
+                   default=[0.0, 0.3, 0.5, 0.65, 0.8, 1.0])
+    s.add_argument("--min-train", type=int, default=300)
+    s.add_argument("--refit", type=int, default=30)
+    s.add_argument("--iters", type=int, default=200)
+    s.add_argument("--json", action="store_true")
+    s.add_argument("--out")
+    s.set_defaults(func=_cmd_tune)
 
     s = sub.add_parser("calib", help="audit du journal de paris : CLV, calibration, ROI")
     s.add_argument("--log", required=True, help="journal au format bets_log_template.csv")

@@ -33,11 +33,15 @@ PRIX JUSTES
   Entropie  1,56 bits (match très incertain)
 
 CONFRONTATION
-  pari                    cote   juste     edge      z
-  O/U 2,5 under           1,80    1,70   +5,66%   2,31   ← retenu
-  1X2 domicile            2,45    2,38   +3,15%   1,12   ← retenu
+  pari                    cote   juste     edge      z   opérateur
+  O/U 2,5 under           1,80    1,70   +5,66%   2,31   BookB (+2,3% vs médiane)  ← retenu
+  1X2 domicile            2,45    2,38   +3,15%   1,12   BookA                     ← retenu
   BTTS non                1,85    1,88   −1,60%  −0,58
   1X2 extérieur           3,20    3,39   −5,60%  −1,94
+
+SEUIL DE BASCULE (ce qui annule l'avantage)
+  O/U 2,5 under    s'annule si le total du match monte de 0,21 but
+  1X2 domicile     s'annule si le total du match baisse de 0,14 but
 
 PLAN DE MISE — banque 2 000 €, Kelly ×0,18
   O/U 2,5 under                       24,60 €   (1,23 %)
@@ -59,6 +63,13 @@ JOURNAL
 **Obligatoire dans toute sortie `/match` :** le bloc DONNÉES avec les
 étiquettes, les trois lignes d'intensités, le drapeau d'écart, les quatre
 nombres par pari, l'exposition totale, l'invalidation, la ligne de journal.
+
+**Le seuil de bascule** répond de façon chiffrée à l'exigence d'invalidation :
+il indique de combien les intensités doivent bouger pour que l'avantage
+disparaisse. « Ce pari meurt si le total baisse de 0,14 but » est vérifiable ;
+« s'ils ne sont pas dans un bon jour » ne l'est pas. Quand plusieurs
+opérateurs sont fournis, la colonne indique lequel offre le meilleur prix et
+combien cela rapporte par rapport à la médiane.
 
 ---
 

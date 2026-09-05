@@ -104,7 +104,15 @@ p_effectif = p − z · σ        (z = 1 par défaut)
 |---|---|
 | Désaccord modèle / marché | la plus informative — 45 % du désaccord |
 | Dispersion inter-méthodes de devig | 70 % de l'écart max entre méthodes |
-| Bruit d'estimation du modèle | décroît en 1/√(poids de données) |
+| Incertitude d'estimation du modèle | **information de Fisher observée**, propagée par la méthode delta |
+
+La troisième composante n'est pas une approximation : c'est l'écart-type réel
+de l'estimation, obtenu en inversant l'information de Fisher du modèle puis en
+la propageant à la probabilité du marché considéré
+(`02_MOTEUR_QUANTITATIF.md` §5 ter). Conséquence concrète : **deux équipes peu
+vues produisent mécaniquement une mise plus petite**, sans aucune règle
+supplémentaire à écrire. Une équipe à 6 matchs est environ 2,4 fois plus
+incertaine qu'une équipe à 72 — et Kelly en tient compte tout seul.
 
 Effet : un avantage de 4 % avec σ = 1 % conserve l'essentiel de sa mise ; le
 même avantage avec σ = 4 % voit sa mise réduite à presque rien. **C'est

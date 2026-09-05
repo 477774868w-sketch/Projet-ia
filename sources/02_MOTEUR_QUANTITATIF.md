@@ -111,8 +111,23 @@ Poids d'un match vieux de `d` jours : `w = exp(−ln2 · d / demi-vie)`.
 
 **Piège classique.** Une demi-vie courte donne de meilleures vraisemblances
 *in-sample* et de moins bonnes *out-of-sample*. Choisissez-la par backtest sur
-le RPS hors échantillon, jamais à l'intuition. Testez 90 / 120 / 180 / 270 et
-retenez le minimum de la courbe.
+le RPS hors échantillon, jamais à l'intuition.
+
+**Ne le faites pas à la main** — la commande le fait :
+
+```bash
+python3 engine/footyedge.py tune --csv data/history/ligue2.csv \
+    --half-lives 90 150 240 360 --regs 0.5 1 2 --w-markets 0 0.3 0.5 0.65 0.8 1
+```
+
+Elle balaie demi-vie × rétrécissement × poids du marché en validation
+temporelle et renvoie la configuration qui minimise le RPS hors échantillon,
+la sensibilité marginale de chaque paramètre, et le verdict « le modèle
+améliore le marché » ou non. Deux astuces la rendent praticable : les
+intensités du marché ne dépendent pas des hyperparamètres (calculées une
+seule fois), et le poids du marché se score gratuitement à ajustement donné.
+Le coût est donc |demi-vies| × |rétrécissements| ajustements, pas le produit
+des trois grilles.
 
 ---
 
@@ -135,6 +150,89 @@ trois problèmes distincts :
 
 Valeurs : `reg = 0,5` (championnat riche en données), `1,0` (défaut),
 `2,0` (peu de matchs, féminin, D3).
+
+---
+
+## 5 bis. Ajustement conjoint de plusieurs divisions
+
+Si les matchs portent un champ `league`, le moteur estime **un décalage de
+niveau de buts par championnat** et conserve des **notes d'équipes globales**.
+
+```
+λ_dom = exp( μ + θ_championnat + (h + δ_championnat) + att_i + def_j )
+```
+
+- `θ` : niveau de buts propre au championnat ;
+- `δ` : écart d'avantage du terrain à la moyenne, fortement rétréci
+  (`reg_hfa`, défaut 4,0) car il s'estime lentement ;
+- `att` et `def` : **globaux**, donc directement comparables d'une division à
+  l'autre.
+
+**Ce que cela résout.** Une équipe promue conserve son historique. Un match de
+coupe entre divisions se tarifie sans hypothèse *ad hoc*. Le niveau relatif
+des championnats devient une sortie du modèle au lieu d'un prior saisi à la
+main.
+
+**D'où vient l'identification ?** Des équipes qui changent de division au fil
+du temps, et des matchs inter-divisions. Sans aucun pont entre deux
+championnats, leurs échelles restent arbitraires — le modèle le signale par un
+`θ` mal déterminé, pas par une erreur.
+
+```bash
+python3 engine/footyedge.py fit --csv data/history/france.csv --out fr.json
+python3 engine/footyedge.py table --model fr.json      # niveau des championnats
+```
+
+Avec un seul championnat, le modèle se réduit **exactement** au cas simple :
+`θ = δ = 0`.
+
+---
+
+## 5 ter. Incertitude d'estimation
+
+Un modèle qui ne sait pas à quel point il ignore les choses sur-mise.
+Le moteur conserve l'**information de Fisher observée** :
+
+```
+J = Σ_m w_m · λ_m · x_m x_mᵀ  +  pénalisation
+```
+
+où `x_m` est le vecteur d'appartenance de l'observation (μ, avantage du
+terrain, championnat, attaque, défense). `J⁻¹` donne directement la covariance
+des notes — sans bootstrap, sans simulation, pour le coût d'une inversion de
+matrice.
+
+| Volume de données | Écart-type sur log(λ) | Rapport au précédent |
+|---|---|---|
+| 1 saison(s), 240 matchs | 0.2840 | — |
+| 2 saison(s), 480 matchs | 0.1796 | 1.58 |
+| 4 saison(s), 960 matchs | 0.1254 | 1.43 |
+| 8 saison(s), 1920 matchs | 0.0853 | 1.47 |
+
+L'écart-type décroît bien en `1/√n` (rapport attendu √2 ≈ 1,41 à chaque
+doublement). Une équipe vue 6 fois est environ **2,4 fois** plus incertaine
+qu'une équipe vue 72 fois.
+
+De là, la méthode delta donne l'écart-type de **n'importe quelle probabilité**
+en quatre constructions de grille :
+
+```python
+sigma = fe.probability_sigma(model, "Guingamp", "Amiens",
+                             lambda g: g.over_under(2.5)["over"]["win"])
+```
+
+Cette valeur alimente directement la décote de Kelly
+(`07_STAKING_RISQUE.md` §3) : **la mise s'ajuste toute seule au volume de
+données disponible sur les deux équipes.** C'est ce qui remplace une sigma
+heuristique par une vraie incertitude d'estimation.
+
+Une crête de régularisation minime est ajoutée sur μ, l'avantage du terrain et
+les décalages de championnat : ces directions ne sont identifiées que par les
+contraintes de centrage, et `J` y serait singulière. Les contrastes réellement
+identifiés n'en sont pas affectés de façon sensible.
+
+Le modèle sérialisé en JSON **ne conserve pas** l'information de Fisher : un
+modèle rechargé renvoie `None` plutôt qu'une fausse certitude.
 
 ---
 
@@ -283,6 +381,8 @@ Avant de faire confiance à un modèle ajusté, vérifier :
 | `mu` | ln(moyenne buts / 2) ± 0,15 | écart important → filtre de championnat mal appliqué |
 | Étendue des notes | 1,0 – 2,0 en log | > 2,5 → sur-ajustement, augmenter `reg` |
 | Corrélation Elo / Dixon-Coles | > 0,85 | < 0,7 → une équipe a un profil de buts atypique |
+| Écart-type sur log(λ) | < 0,15 | > 0,25 → trop peu de données, élargir σ et réduire Kelly |
+| θ entre deux divisions | 0,05 – 0,25 | signe inversé → vérifier l'étiquetage des championnats |
 | RPS hors échantillon vs marché | écart < 0,010 | modèle nettement battu → ne pas s'en écarter |
 
 Le dernier point est le plus important : **si votre modèle seul ne s'approche

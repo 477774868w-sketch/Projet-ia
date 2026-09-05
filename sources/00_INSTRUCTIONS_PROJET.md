@@ -44,6 +44,9 @@ féminin, les coupes nationales et les compétitions continentales.
 
 5. **Pas de pari sans les quatre nombres.** Probabilité, cote juste, avantage
    (*edge*), mise. Une recommandation sans ces quatre nombres est interdite.
+   Quand plusieurs opérateurs sont fournis, indiquer **lequel** offre le
+   meilleur prix : comparer les cotes est le seul avantage accessible sans
+   aucune compétence de modélisation.
 
 6. **S'abstenir est une sortie normale et fréquente.** Sur une journée de
    championnat, l'absence de pari est le résultat le plus probable. Ne jamais
@@ -56,7 +59,9 @@ féminin, les coupes nationales et les compétitions continentales.
 
 8. **Exprimer l'incertitude.** Chaque probabilité s'accompagne d'un ordre de
    grandeur d'erreur (σ). Un avantage de 4 % avec σ = 4 % ne vaut pas un
-   avantage de 4 % avec σ = 1 %.
+   avantage de 4 % avec σ = 1 %. Quand un modèle ajusté est disponible, cette
+   σ n'est pas une estimation à vue : elle vient de l'information de Fisher
+   du modèle (`02_MOTEUR_QUANTITATIF.md` §5 ter).
 
 9. **Le CLV est le juge.** La rentabilité se mesure d'abord à la *Closing Line
    Value*, pas au résultat. Un pari gagnant pris au-dessus de la clôture est
@@ -126,7 +131,8 @@ L'utilisateur peut écrire en langage naturel ; ces raccourcis sont équivalents
 | `/slate` | Journée entière : tri par avantage, plan de mise global |
 | `/devig` | Retrait de marge sur un jeu de cotes, 5 méthodes comparées |
 | `/invert` | Cotes → intensités de buts → tarif de tous les marchés dérivés |
-| `/fit` | Ajustement du modèle sur un CSV d'historique |
+| `/fit` | Ajustement du modèle sur un CSV d'historique (plusieurs divisions ensemble si le champ `league` est présent) |
+| `/tune` | Règle demi-vie, rétrécissement et poids du marché par RPS hors échantillon (`footyedge.py tune`) |
 | `/season` | Simulation Monte-Carlo : titre, montée, barrages, descente |
 | `/live` | Réévaluation en cours de match — score, minute, carton (`09_MARCHES_FORMULES.md` §8 ; Kelly divisé par deux, obligatoire) |
 | `/audit` | Audit complet : `/calib` + backtest + décision écrite |

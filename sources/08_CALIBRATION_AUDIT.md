@@ -49,6 +49,20 @@ print(bt["summary"]["rps"])            # {'model':…, 'market':…, 'blend':…
 print(bt["summary"]["rps_edge_vs_market"])
 ```
 
+**Ne devinez pas `w_marché`, mesurez-le.** La commande `tune` balaie
+demi-vie × rétrécissement × poids du marché et renvoie la configuration qui
+minimise le RPS hors échantillon, plus la sensibilité marginale de chaque
+paramètre :
+
+```bash
+python3 engine/footyedge.py tune --csv data/history/ligue2.csv \
+    --half-lives 90 150 240 360 --regs 0.5 1 2
+```
+
+La courbe de `w_marché` est en U : elle vous dit à la fois si votre modèle
+apporte quelque chose (minimum strictement à l'intérieur de [0 ; 1]) et
+combien lui accorder.
+
 Un gain de **0,003 à 0,008** de RPS sur le marché est déjà un très bon
 résultat. Un gain supérieur à 0,02 doit déclencher une recherche de fuite
 d'information, pas une célébration.
@@ -90,11 +104,55 @@ print(rep["clv"]["verdict"], rep["stop_criteria_triggered"])
 | 0,04 – 0,07 | Recalibrage nécessaire |
 | > 0,07 | Modèle non exploitable en l'état |
 
+### Corriger, et pas seulement mesurer
+
+Le moteur sait aussi **recalibrer** : mise à l'échelle vectorielle sur les
+log-probabilités,
+
+```
+p_calibré ∝ exp( log(p_k) / T + b_k )
+```
+
+`T` corrige la sur-confiance globale (T > 1 aplatit), les `b_k` un biais
+systématique par issue — typiquement le nul. Trois paramètres seulement : le
+sur-ajustement est négligeable et la transformation est monotone, donc elle ne
+peut jamais inverser un classement de probabilités.
+
+Comportement sur cas témoins, où la bonne réponse est connue :
+
+| Cas témoin | Température estimée | ECE avant | ECE après | Log-perte |
+|---|---|---|---|---|
+| modèle sur-confiant (exposant 1,6) | **1.175** | 0.0581 | 0.0001 | +0.01605 |
+| modèle déjà calibré | **0.976** | 0.0091 | 0.0000 | +0.00054 |
+| modèle sous-confiant (exposant 0,7) | **0.923** | 0.0434 | 0.0001 | +0.00945 |
+
+Sur un modèle sur-confiant, l'ECE tombe de 0,058 à 0,000 et la log-perte
+s'améliore de 0,016. Sur un modèle déjà calibré, la température reste à 0,98 :
+la correction ne fait rien, ce qui est le comportement souhaité.
+
+```bash
+python3 engine/footyedge.py backtest --csv data/history/ligue2.csv --calibrate
+```
+
+En backtest, la recalibration est réajustée à chaque refit **sur les seules
+prédictions passées** et appliquée aux suivantes : aucune fuite. Le rapport
+donne les métriques avant et après.
+
+> **Attention — la recalibration n'est pas gratuite.** Sur un modèle déjà
+> proche de la calibration, elle améliore l'ECE mais coûte de la *finesse* :
+> aplatir les probabilités réduit la log-perte des cas mal classés et augmente
+> celle des cas bien classés. Sur nos données synthétiques, ECE 0,025 → 0,014
+> mais log-perte **dégradée** de 0,003.
+>
+> Règle : n'activer la recalibration que si l'ECE dépasse **0,04**, et la
+> conserver seulement si la log-perte hors échantillon s'améliore aussi. Le
+> backtest donne les deux ; la décision est mesurée, pas dogmatique.
+
 **Défauts typiques et correctifs :**
 
 | Motif dans les bacs | Cause probable | Correctif |
 |---|---|---|
-| Extrêmes trop confiants (90 % → 80 % observé) | Sur-ajustement, `reg` trop faible | Augmenter `reg`, augmenter `w_marché` |
+| Extrêmes trop confiants (90 % → 80 % observé) | Sur-ajustement, `reg` trop faible | `tune` pour `reg` et `w_marché` ; recalibration si l'ECE reste > 0,04 |
 | Tout tassé vers 33 % | Sous-ajustement, demi-vie trop longue | Réduire la demi-vie |
 | Nuls systématiquement sous-estimés | `ρ` mal ajusté ou fixé à 0 | Réajuster `ρ` |
 | Bon en 1X2, mauvais en totaux | Suprématie correcte, total faux | Vérifier les priors de total du championnat |

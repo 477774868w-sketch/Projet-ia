@@ -63,12 +63,23 @@ Trois voies, par ordre de qualité décroissante.
 ### 2a. Modèle ajusté (nominal)
 
 ```python
-matches = fe.load_matches_csv("data/history/ligue2.csv")
+matches = fe.load_matches_csv("data/history/france.csv")   # D1 + D2 ensemble
 model = fe.fit_dixon_coles(matches, half_life_days=180, reg=1.0)
 lh_m, la_m = model.lambdas("Guingamp", "Amiens")
+sigma = model.lambda_uncertainty("Guingamp", "Amiens")     # incertitude reelle
 ```
 
-Réglages de la demi-vie : voir `02_MOTEUR_QUANTITATIF.md` §4.
+Deux points qui changent tout :
+
+- **Charger toutes les divisions d'un pays dans le même fichier** (champ
+  `league`). Les notes deviennent comparables entre divisions, les promus
+  gardent leur historique et les matchs de coupe se tarifient
+  (`02_MOTEUR_QUANTITATIF.md` §5 bis).
+- **Régler les hyperparamètres par `tune`, pas à l'intuition**
+  (`02_MOTEUR_QUANTITATIF.md` §4).
+
+Si `lambda_uncertainty` renvoie un écart-type supérieur à 0,25 sur log(λ), les
+données sont trop maigres : élargir σ, diviser Kelly par deux, ou s'abstenir.
 
 ### 2b. Reconstruction à partir des dernières rencontres
 
@@ -129,6 +140,17 @@ Deux correctifs :
 
 **Ne jamais descendre sous `w_marché = 0,20` quand un marché liquide existe.**
 
+**Ce tableau n'est qu'un point de départ.** Dès que vous disposez de deux
+saisons du championnat avec des cotes, mesurez-le :
+
+```bash
+python3 engine/footyedge.py tune --csv data/history/ligue2.csv
+```
+
+La courbe de `w_marché` est en U. Son minimum donne la valeur à retenir, et sa
+position dit si le modèle apporte quelque chose : un minimum en `w = 1`
+signifie qu'il n'apporte rien et qu'il ne faut pas parier le 1X2.
+
 ---
 
 ## Phase 5 — Tarification
@@ -158,14 +180,27 @@ res = fe.price_match(..., offered={
 print(fe.render_match(res, "Guingamp", "Amiens", "Ligue 2"))
 ```
 
+Les cotes peuvent être données **par opérateur** — le moteur retient alors la
+meilleure et chiffre le gain par rapport à la médiane :
+
+```python
+offered = {"1x2": {"home": {"BookA": 2.42, "BookB": 2.55}, "draw": 3.40}}
+```
+
 Trois nombres par pari :
 
 - `edge` = espérance par unité misée ;
-- `σ` = écart-type de la probabilité estimée ;
+- `σ` = écart-type de la probabilité estimée — information de Fisher du
+  modèle, dispersion de devig, désaccord avec le marché ;
 - `z` = edge / (σ · cote) — **le vrai critère de tri**. Un edge de 6 % à
   σ = 5 % est plus fragile qu'un edge de 3 % à σ = 1 %.
 
-Seuil de retenue : `edge ≥ seuil du palier` **et** `z ≥ 1,0`.
+Seuil de retenue : `edge ≥ seuil du palier` **et** `z ≥ 1,0`. Le moteur
+applique désormais les deux conditions lui-même.
+
+Chaque pari retenu porte en plus son **seuil de bascule** : de combien le
+total du match doit bouger pour que l'avantage disparaisse. C'est la réponse
+chiffrée à l'exigence d'invalidation.
 
 ---
 
@@ -216,4 +251,4 @@ information ? ».
 | Après chaque journée | Saisir clôtures et résultats |
 | Toutes les 50 lignes | `/calib` |
 | Toutes les 200 lignes | `/audit` + décision |
-| Chaque intersaison | Refit complet, révision des priors, revue des paliers |
+| Chaque intersaison | Refit complet, `tune` sur la saison écoulée, révision des priors et des paliers |
