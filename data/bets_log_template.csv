@@ -1,2 +1,0 @@
-date,competition,match,kickoff,market,selection,odds_taken,operator,taken_at,prob_model,prob_market,edge,sigma,z,kelly_fraction,stake,bankroll_before,w_market,adjustments,note,closing_odds,closing_fair_odds,clv_fair,beat_close,result,pnl,bankroll_after
-2026-03-14,FRA2,Guingamp-Amiens,20:00,OU2.5,under,1.80,OperateurR,18:40,0.587,0.556,0.0566,0.019,2.31,0.0123,24.60,2000.00,0.50,"x0.91 absence n9","attente compo non respectee",1.76,1.72,0.0465,1,LOST,-24.60,1975.40
