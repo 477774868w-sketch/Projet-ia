@@ -2282,8 +2282,9 @@ def selftest(verbose=True):
     ke = kelly_exclusive(kp, ko)
 
     def _elog(f):
+        # somme(f) == 1 est realisable quand les issues sont exhaustives
         tot = sum(f)
-        if tot >= 1.0 or any(x < 0 for x in f):
+        if tot > 1.0 + 1e-12 or any(x < 0 for x in f):
             return float("-inf")
         s_ = 0.0
         for i, pi in enumerate(kp):
